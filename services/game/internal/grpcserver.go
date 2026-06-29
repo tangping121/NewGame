@@ -34,8 +34,16 @@ func (s *Server) runGRPC() {
 	}
 	srv := grpc.NewServer(grpc.UnaryInterceptor(internalauth.UnaryServerInterceptor(s.cfg.InternalSecret)))
 	gamerpc.RegisterForwarderServer(srv, s)
+	s.grpcSrv = srv
 	s.log.Info("game grpc listening", zap.String("addr", s.cfg.GRPCAddr))
-	if err := srv.Serve(ln); err != nil {
+	if err := srv.Serve(ln); err != nil && err != grpc.ErrServerStopped {
 		s.log.Error("game grpc serve failed", zap.Error(err))
+	}
+}
+
+// stopGRPC 优雅停止 gRPC 服务（关停时调用）。
+func (s *Server) stopGRPC() {
+	if s.grpcSrv != nil {
+		s.grpcSrv.GracefulStop()
 	}
 }

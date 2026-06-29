@@ -300,3 +300,6 @@ infra:
 | 协议帧编码修正 | Encode 不再多写 2 字节，修复真实多帧连接错乱/断连 |
 | Battle 房间 TTL 清理 | 后台清过期房间，修内存泄漏 |
 | Game 关停刷盘 | 退出前 FlushAll 待落库玩家，避免丢数据 |
+| Prometheus 指标接线 | gate_connections / online_per_shard / save_queue_depth / forward_latency 等 |
+| 单连接限速 | `msg_rate_per_sec` 防单连接刷包 |
+| Game gRPC 优雅停机 | 关停时 GracefulStop |

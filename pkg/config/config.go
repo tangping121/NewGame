@@ -112,6 +112,12 @@ type GateScale struct {
 	WriteTimeoutSec  int    `yaml:"write_timeout_sec"`  // 客户端写超时，默认 5
 	ForwardTimeoutMs int    `yaml:"forward_timeout_ms"` // 转发 Game 超时，默认 3000
 	Acceptors        int    `yaml:"acceptors"`          // TCP Accept 协程数，默认 1
+	MsgRatePerSec    int    `yaml:"msg_rate_per_sec"`   // 单连接每秒最大消息数，<=0 不限
+}
+
+// MsgRate 单连接每秒消息上限；<=0 表示不限。
+func (g GateScale) MsgRate() int {
+	return g.MsgRatePerSec
 }
 
 // ReadTimeout 客户端读超时（含心跳间隔余量）。

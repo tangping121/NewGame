@@ -30,6 +30,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 type Server struct {
@@ -44,6 +45,7 @@ type Server struct {
 	guildwar   *guildwar.Service
 	worldboss  *worldboss.Service
 	auction    *auction.Service
+	grpcSrv    *grpc.Server
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -398,11 +400,35 @@ func (s *Server) handleWorldBossReset(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "boss": st})
 }
 
+// reportMetrics 定期把在线数、落库队列深度与累计落库次数写入 Prometheus 指标。
+func (s *Server) reportMetrics() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	var lastSaved, lastFailed int64
+	for range ticker.C {
+		app.GameOnline.Set(float64(s.players.Online()))
+		if saver := s.players.Saver(); saver != nil {
+			app.GameSaveQueueDepth.Set(float64(saver.QueueDepth()))
+			saved, failed := saver.Stats()
+			if d := saved - lastSaved; d > 0 {
+				app.GameSaveTotal.Add(float64(d))
+				lastSaved = saved
+			}
+			if d := failed - lastFailed; d > 0 {
+				app.GameSaveFailed.Add(float64(d))
+				lastFailed = failed
+			}
+		}
+	}
+}
+
 func (s *Server) Run() error {
 	return app.RunWithDiscovery(s.cfg, s.log, func() error {
 		go s.runGRPC()
+		go s.reportMetrics()
 		err := app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-		// 收到关停信号、HTTP 退出后，把待落库玩家全部刷盘，避免丢数据。
+		// 收到关停信号、HTTP 退出后：优雅停 gRPC + 刷盘待落库玩家，避免丢数据。
+		s.stopGRPC()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		s.players.FlushAll(ctx)

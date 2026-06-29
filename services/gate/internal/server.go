@@ -180,6 +180,8 @@ func (s *Server) acceptLoop(ln net.Listener, wg *sync.WaitGroup) error {
 		go func(c net.Conn) {
 			defer wg.Done()
 			defer s.limiter.release(c.RemoteAddr())
+			app.GateConnections.Inc()
+			defer app.GateConnections.Dec()
 			s.handleConn(c)
 		}(conn)
 	}
@@ -203,6 +205,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	hdr := make([]byte, 2)
 	var body []byte
 	readTimeout := s.cfg.Gate.ReadTimeout()
+	rate := s.cfg.Gate.MsgRate() // 单连接每秒消息上限
+	var winStart time.Time
+	var winCount int
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 		if _, err := io.ReadFull(reader, hdr); err != nil {
@@ -224,6 +229,19 @@ func (s *Server) handleConn(conn net.Conn) {
 		frame, err := protocol.Decode(body[2:])
 		if err != nil {
 			return
+		}
+		// 单连接限速：超过阈值的帧直接回错误，防止单连接刷包。
+		if rate > 0 {
+			now := time.Now()
+			if now.Sub(winStart) >= time.Second {
+				winStart = now
+				winCount = 0
+			}
+			winCount++
+			if winCount > rate {
+				_ = cc.write(errFrame(frame, errors.CodeInvalidParam, "rate limited"))
+				continue
+			}
 		}
 		wasAuthed := st.authed
 		resp := s.dispatch(context.Background(), st, frame)
@@ -340,7 +358,9 @@ func (s *Server) forwardGame(ctx context.Context, st *connState, f protocol.Fram
 	// 限定转发耗时，避免单个 Game 慢请求拖垮 Gate 连接 goroutine。
 	fctx, cancel := context.WithTimeout(ctx, s.cfg.Gate.ForwardTimeout())
 	defer cancel()
+	t0 := time.Now()
 	b, err := s.forward.Forward(fctx, target, st.roleID, st.zoneID, f.Cmd, f.Act, f.Body)
+	app.GateForwardLatency.Observe(time.Since(t0).Seconds())
 	if err != nil {
 		return errFrame(f, errors.CodeInternal, "game unavailable")
 	}

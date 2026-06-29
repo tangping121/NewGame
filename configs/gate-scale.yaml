@@ -17,6 +17,7 @@ gate:
   write_timeout_sec: 5   # 客户端写超时
   forward_timeout_ms: 3000  # 转发 Game 超时
   acceptors: 4           # Accept 协程数（高建连速率下提升接入吞吐）
+  msg_rate_per_sec: 100  # 单连接每秒最大消息数（防刷），0 不限
 infra:
   redis: "127.0.0.1:6379"
   nats: "nats://127.0.0.1:4222"
