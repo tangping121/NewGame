@@ -1,0 +1,33 @@
+# 编译产物
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试
+*.test
+*.out
+coverage.*
+
+# 工具下载（gen-proto 临时 protoc）
+/.tools/
+
+# 依赖缓存
+/vendor/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 本地环境与密钥
+*.local
+.env
+.env.*

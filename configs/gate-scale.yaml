@@ -1,0 +1,26 @@
+# Gate 大规模模式：HTTP 连接池转发（P1）；生产建议 game_transport: grpc
+name: gate
+type: gate
+http_addr: ":9001"
+tcp_addr: ":9000"
+zone_id: 1
+zone_mode: dedicated
+max_conn_per_ip: 32
+log_level: info
+scale:
+  shard_count: 50
+internal_secret: ""      # 生产填非空密钥开启内部接口鉴权
+gate:
+  game_transport: grpc   # grpc | http_pool；grpc 走 Game grpc_addr，HTTP/2 多路复用
+  game_pool_size: 256
+  read_timeout_sec: 60   # 客户端读超时（心跳窗口）
+  write_timeout_sec: 5   # 客户端写超时
+  forward_timeout_ms: 3000  # 转发 Game 超时
+  acceptors: 4           # Accept 协程数（高建连速率下提升接入吞吐）
+infra:
+  redis: "127.0.0.1:6379"
+  nats: "nats://127.0.0.1:4222"
+discovery:
+  enabled: true
+  ttl_sec: 15
+  heartbeat_sec: 5

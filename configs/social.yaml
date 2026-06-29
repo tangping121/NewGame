@@ -1,0 +1,12 @@
+name: social
+type: social
+http_addr: ":9400"
+zone_id: 1
+log_level: info
+infra:
+  redis: "127.0.0.1:6379"
+  nats: "nats://127.0.0.1:4222"
+discovery:
+  enabled: true
+  ttl_sec: 15
+  heartbeat_sec: 5

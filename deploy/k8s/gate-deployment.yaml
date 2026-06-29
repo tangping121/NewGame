@@ -1,0 +1,60 @@
+# Gate 接入层：无序 pod，水平扩展。客户端经 LoadBalancer（L4，连接粘滞）接入。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gate
+  namespace: newgame
+spec:
+  replicas: 10                       # 10 万 CCU（~1.5 万连接/节点）；100 万时 67~100
+  selector:
+    matchLabels:
+      app: gate
+  template:
+    metadata:
+      labels:
+        app: gate
+    spec:
+      containers:
+        - name: gate
+          image: newgame/gate:latest
+          args: ["-config", "/etc/newgame/gate.yaml"]
+          ports:
+            - { name: tcp,  containerPort: 9000 }
+            - { name: http, containerPort: 9001 }
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NG_SHARD_COUNT
+              value: "50"
+            - name: NG_TCP_ADDR
+              value: ":9000"
+            - name: NG_HTTP_ADDR
+              value: ":9001"
+            - name: NG_ZONE_ID
+              value: "1"
+            - name: NG_REDIS_CLUSTER
+              value: "redis-0.redis:6379,redis-1.redis:6379,redis-2.redis:6379"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "500m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gate-lb
+  namespace: newgame
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local       # 保留客户端 IP，利于连接粘滞
+  selector:
+    app: gate
+  ports:
+    - name: tcp
+      port: 9000
+      targetPort: tcp

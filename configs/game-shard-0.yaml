@@ -1,0 +1,30 @@
+# 10 万 CCU 基线：Game 分片 0（共 50 片）
+name: game-shard-0
+type: game
+http_addr: ":9100"
+grpc_addr: ":9150"
+zone_id: 1
+log_level: info
+internal_secret: ""   # 生产环境填非空密钥，开启 /internal/* 与 gRPC 鉴权
+scale:
+  shard_id: 0
+  shard_count: 50
+  max_ccu: 2000
+  save_mode: async
+  save_interval_sec: 10
+  save_concurrency: 16
+rank:
+  cap: 10000
+  trim_interval_sec: 60
+infra:
+  redis: "127.0.0.1:6379"
+  postgres: "postgres://newgame:newgame@127.0.0.1:5432/newgame?sslmode=disable"
+  nats: "nats://127.0.0.1:4222"
+discovery:
+  enabled: true
+  ttl_sec: 15
+  heartbeat_sec: 5
+observability:
+  tracing:
+    enabled: false
+  prometheus: true

@@ -1,0 +1,51 @@
+# Login：无状态，水平扩展。客户端经普通 Service/Ingress 访问。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: login
+  namespace: newgame
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: login
+  template:
+    metadata:
+      labels:
+        app: login
+    spec:
+      containers:
+        - name: login
+          image: newgame/login:latest
+          args: ["-config", "/etc/newgame/login.yaml"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: NG_HTTP_ADDR
+              value: ":8080"
+            - name: NG_ZONE_ID
+              value: "1"
+            - name: NG_REDIS_CLUSTER
+              value: "redis-0.redis:6379,redis-1.redis:6379,redis-2.redis:6379"
+            - name: NG_POSTGRES
+              value: "postgres://u:p@pg0:5432/newgame?sslmode=disable"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "250m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: login
+  namespace: newgame
+spec:
+  selector:
+    app: login
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

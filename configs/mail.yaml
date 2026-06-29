@@ -1,0 +1,12 @@
+name: mail
+type: mail
+http_addr: ":9500"
+zone_id: 1
+log_level: info
+infra:
+  redis: "127.0.0.1:6379"
+  nats: "nats://127.0.0.1:4222"
+discovery:
+  enabled: true
+  ttl_sec: 15
+  heartbeat_sec: 5

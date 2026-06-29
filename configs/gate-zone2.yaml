@@ -1,0 +1,16 @@
+name: gate-z2
+type: gate
+http_addr: ":9011"
+tcp_addr: ":9010"
+zone_id: 2
+zone_mode: dedicated
+max_conn_per_ip: 32
+log_level: info
+infra:
+  redis: "127.0.0.1:6379"
+  postgres: "postgres://newgame:newgame@127.0.0.1:5432/newgame?sslmode=disable"
+  nats: "nats://127.0.0.1:4222"
+discovery:
+  enabled: true
+  ttl_sec: 15
+  heartbeat_sec: 5

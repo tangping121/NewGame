@@ -1,0 +1,90 @@
+// NewGame 跨服务 HTTP/JSON 与 NATS 消息定义。
+// Gate TCP 二进制帧（cmd/act）见 pkg/protocol；HTTP 路由见 pkg/protocol/http_api.go。
+syntax = "proto3";
+package newgame.api;
+
+option go_package = "newgame/api/pb";
+
+// LoginRequest POST /api/login 请求体。
+message LoginRequest {
+  string username = 1 [json_name = "username"]; // 用户名；不存在则自动注册
+  string password = 2 [json_name = "password"]; // 明文密码（传输层应使用 HTTPS）
+  int32 zone_id = 3 [json_name = "zone_id"];    // 目标区服 ID，如 1、2
+}
+
+// LoginResponse POST /api/login 响应体。
+message LoginResponse {
+  int32 code = 1 [json_name = "code"];           // 0=成功；1001 参数错；1002 密码错
+  string token = 2 [json_name = "token"];      // 会话令牌，Gate CmdLogin 时使用
+  int64 role_id = 3 [json_name = "role_id"];   // 该区服角色 ID
+  string gate_addr = 4 [json_name = "gate_addr"]; // Gate TCP 地址，如 127.0.0.1:9000
+  string message = 5 [json_name = "message"];  // 可读说明
+}
+
+// EnterGateRequest Gate TCP CmdLogin(1) ActLogin(1) 的 JSON 载荷。
+message EnterGateRequest {
+  string token = 1 [json_name = "token"]; // Login 返回的 token
+}
+
+// MatchRequest POST /api/match/join 请求体。
+message MatchRequest {
+  int64 role_id = 1 [json_name = "role_id"]; // 匹配角色 ID
+  int32 mode = 2 [json_name = "mode"];     // 匹配模式，默认 0
+  int32 zone_id = 3 [json_name = "zone_id"]; // 角色区服；跨服匹配时必填
+}
+
+// MatchResponse POST /api/match/join 响应体。
+message MatchResponse {
+  int32 code = 1 [json_name = "code"];         // 0=成功；5000 匹配/建房失败
+  string match_id = 2 [json_name = "match_id"]; // 匹配 ID；等待中为 wait_{role_id}
+  string room_id = 3 [json_name = "room_id"];   // Battle 房间 ID；未凑满人为空
+}
+
+// BattleRoomCreateRequest POST /api/battle/room/create 请求体（Match 内部调用）。
+message BattleRoomCreateRequest {
+  repeated int64 members = 1 [json_name = "members"]; // 至少 2 名玩家 role_id
+}
+
+// BattleRoomCreateResponse POST /api/battle/room/create 响应体。
+message BattleRoomCreateResponse {
+  int32 code = 1 [json_name = "code"];       // 0=成功
+  string room_id = 2 [json_name = "room_id"]; // 战斗房间 ID，如 br_1
+}
+
+// BattleResultRequest POST /api/battle/settle 请求体。
+message BattleResultRequest {
+  string room_id = 1 [json_name = "room_id"]; // 房间 ID
+  int64 role_id = 2 [json_name = "role_id"];  // 上报者角色 ID
+  bool win = 3 [json_name = "win"];           // 是否胜利
+  int32 score = 4 [json_name = "score"];      // 本局得分
+}
+
+// BattleResultResponse POST /api/battle/settle 响应体。
+message BattleResultResponse {
+  int32 code = 1 [json_name = "code"]; // 0=成功；1003 房间不存在
+}
+
+// RankUpdateRequest POST /api/rank/update 与 NATS rank.update 消息体。
+message RankUpdateRequest {
+  int32 zone_id = 1 [json_name = "zone_id"]; // 区服 ID
+  int64 role_id = 2 [json_name = "role_id"];  // 角色 ID
+  int64 score = 3 [json_name = "score"];     // 榜单分数（ZSET score）
+  string board = 4 [json_name = "board"];    // 榜类型，如 dungeon、level
+}
+
+// MailSendRequest POST /api/mail/send 与 NATS mail.send 消息体。
+message MailSendRequest {
+  int64 role_id = 1 [json_name = "role_id"]; // 收件人
+  string title = 2 [json_name = "title"];    // 邮件标题
+  string content = 3 [json_name = "content"]; // 正文
+  string items = 4 [json_name = "items"];    // 附件奖励串，如 gold:100,potion:1
+}
+
+// PayNotifyRequest POST /api/pay/notify 支付回调请求体。
+message PayNotifyRequest {
+  string order_id = 1 [json_name = "order_id"];   // 订单号
+  int64 role_id = 2 [json_name = "role_id"];      // 购买角色
+  string product_id = 3 [json_name = "product_id"]; // 商品 ID
+  int32 amount = 4 [json_name = "amount"];        // 金额
+  int32 status = 5 [json_name = "status"];        // 1=已支付（OrderStatusPaid）
+}

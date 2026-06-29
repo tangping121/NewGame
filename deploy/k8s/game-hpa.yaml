@@ -1,0 +1,55 @@
+# Game 分片自动扩缩：按自定义指标 ng_online_per_shard（在线数）扩容。
+# 需配套 prometheus-adapter 将 /metrics 暴露为 custom.metrics.k8s.io。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: game-shard-hpa
+  namespace: newgame
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: game-shard
+  minReplicas: 50
+  maxReplicas: 500
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: ng_online_per_shard
+        target:
+          type: AverageValue
+          averageValue: "1800"        # 超过单片 1800 在线触发扩容（阈值 2000）
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+# Gate 自动扩缩：按连接数（gate_connections）。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gate-hpa
+  namespace: newgame
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gate
+  minReplicas: 10
+  maxReplicas: 100
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: gate_connections
+        target:
+          type: AverageValue
+          averageValue: "12000"       # 单节点超 1.2 万连接触发扩容（上限 1.5 万）

@@ -1,0 +1,21 @@
+name: game
+type: game
+http_addr: ":9100"
+zone_id: 1
+log_level: info
+scale:
+  save_mode: async
+  save_interval_sec: 10
+infra:
+  redis: "127.0.0.1:6379"
+  postgres: "postgres://newgame:newgame@127.0.0.1:5432/newgame?sslmode=disable"
+  nats: "nats://127.0.0.1:4222"
+discovery:
+  enabled: true
+  ttl_sec: 15
+  heartbeat_sec: 5
+observability:
+  tracing:
+    enabled: false
+    otlp_endpoint: ""
+  prometheus: true

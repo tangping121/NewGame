@@ -1,0 +1,56 @@
+# Game 分片集群：StatefulSet 保证稳定的有序 pod 名（game-shard-0..N-1）。
+# 每个 pod 通过 POD_NAME 末尾序号自动得到 shard_id（见 pkg/config 环境覆盖）。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: game-shard
+  namespace: newgame
+spec:
+  serviceName: game-shard
+  replicas: 50                      # 10 万 CCU；100 万时调到 500
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: game-shard
+  template:
+    metadata:
+      labels:
+        app: game-shard
+    spec:
+      containers:
+        - name: game
+          image: newgame/game:latest
+          args: ["-config", "/etc/newgame/game.yaml"]
+          ports:
+            - { name: http, containerPort: 9100 }
+            - { name: grpc, containerPort: 9150 }
+          env:
+            - name: POD_NAME              # game-shard-3 → shard_id=3
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NG_SHARD_COUNT
+              value: "50"
+            - name: NG_HTTP_ADDR
+              value: ":9100"
+            - name: NG_GRPC_ADDR
+              value: ":9150"
+            - name: NG_ZONE_ID
+              value: "1"
+            - name: NG_REDIS_CLUSTER
+              value: "redis-0.redis:6379,redis-1.redis:6379,redis-2.redis:6379"
+            - name: NG_NATS
+              value: "nats://nats:4222"
+            - name: NG_POSTGRES_SHARDS
+              value: "postgres://u:p@pg0:5432/newgame?sslmode=disable,postgres://u:p@pg1:5432/newgame?sslmode=disable"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+      volumes:
+        - name: cfg
+          configMap:
+            name: game-config
