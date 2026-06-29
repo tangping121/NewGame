@@ -297,3 +297,6 @@ infra:
 | Gate 帧缓冲复用 + 优雅停机 | 复用 header/body 缓冲减 GC；SIGTERM 关监听并 drain |
 | Gate→Game 免双重编码 | cmd/act/role 走 HTTP 头，payload 直传 body（不再 JSON 套 JSON） |
 | Gate 多 acceptor + 超时配置化 | 并发 Accept 提升建连吞吐；读/写/转发超时可配 |
+| 协议帧编码修正 | Encode 不再多写 2 字节，修复真实多帧连接错乱/断连 |
+| Battle 房间 TTL 清理 | 后台清过期房间，修内存泄漏 |
+| Game 关停刷盘 | 退出前 FlushAll 待落库玩家，避免丢数据 |

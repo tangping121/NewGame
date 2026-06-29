@@ -130,6 +130,14 @@ func (s *AsyncSaver) flushAll(ctx context.Context) {
 	wg.Wait()
 }
 
+// FlushPending 立即落库当前所有待写 Actor（进程关停时调用，防丢数据）。
+func (s *AsyncSaver) FlushPending(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.flushAll(ctx)
+}
+
 // FlushNow 立即同步落库（支付、拍卖等关键路径）。
 func (s *AsyncSaver) FlushNow(ctx context.Context, a *Actor) error {
 	if a == nil {

@@ -121,6 +121,13 @@ func (m *Manager) evictLoop() {
 	}
 }
 
+// FlushAll 关停时把所有待落库玩家同步写入 DB，避免丢数据。
+func (m *Manager) FlushAll(ctx context.Context) {
+	if m.saver != nil {
+		m.saver.FlushPending(ctx)
+	}
+}
+
 // Online 返回当前内存中的在线 Actor 数（近似，用于监控）。
 func (m *Manager) Online() int {
 	n := 0

@@ -33,8 +33,9 @@ type Frame struct {
 //
 // 返回: 完整帧字节，前缀 2 字节为 big-endian 长度
 func Encode(f Frame) []byte {
+	// n 为整帧总长（含 2 字节长度前缀）：len(2)+cmd(2)+act(2)+payload。
 	n := HeaderSize + len(f.Body)
-	buf := make([]byte, 2+n)
+	buf := make([]byte, n)
 	binary.BigEndian.PutUint16(buf[0:2], uint16(n))
 	binary.BigEndian.PutUint16(buf[2:4], f.Cmd)
 	binary.BigEndian.PutUint16(buf[4:6], f.Act)

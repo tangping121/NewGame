@@ -36,11 +36,32 @@ func New(cfgPath string) (*Server, error) {
 	if err := config.Load(cfgPath, &cfg); err != nil {
 		return nil, err
 	}
-	return &Server{
+	s := &Server{
 		cfg:   cfg,
 		log:   log.New(cfg.LogLevel),
 		rooms: make(map[string]*room),
-	}, nil
+	}
+	go s.cleanupRooms()
+	return s, nil
+}
+
+// roomTTL 战斗房间保留时长，超时由后台清理，防止内存无限增长。
+const roomTTL = 30 * time.Minute
+
+// cleanupRooms 后台定期清理过期房间。
+func (s *Server) cleanupRooms() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		cutoff := time.Now().Add(-roomTTL)
+		s.mu.Lock()
+		for id, rm := range s.rooms {
+			if rm.Created.Before(cutoff) {
+				delete(s.rooms, id)
+			}
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *Server) Handler() http.Handler {

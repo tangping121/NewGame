@@ -401,6 +401,12 @@ func (s *Server) handleWorldBossReset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run() error {
 	return app.RunWithDiscovery(s.cfg, s.log, func() error {
 		go s.runGRPC()
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
+		err := app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
+		// 收到关停信号、HTTP 退出后，把待落库玩家全部刷盘，避免丢数据。
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		s.players.FlushAll(ctx)
+		s.log.Info("game flushed pending saves on shutdown")
+		return err
 	})
 }
