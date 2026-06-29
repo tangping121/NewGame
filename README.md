@@ -156,9 +156,10 @@ make test-integration
 go test -tags=integration ./tests/integration/...
 ```
 
-## 协议
+## 协议与客户端对接
 
-完整定义见 `pkg/protocol/`（TCP 帧、JSON 载荷、HTTP 路由、NATS 主题）与 `api/proto/messages.proto`。
+- **客户端对接（推荐阅读）**：[docs/client-integration.md](docs/client-integration.md) — 登录流程、TCP 帧格式、Cmd/Act 一览、错误码、示例时序
+- 完整定义见 `pkg/protocol/`（TCP 帧、JSON 载荷、HTTP 路由、NATS 主题）与 `api/proto/messages.proto`
 
 ### Gate TCP（客户端 ↔ Gate）
 
@@ -203,7 +204,7 @@ go test -tags=integration ./tests/integration/...
 
 - 各 HTTP 服务自动采集请求数、5xx 错误、平均延迟
 - `GET /metrics` 返回 JSON 指标
-- `GET /metrics/prometheus` 供 Prometheus 抓取（`ng_http_*` 指标）
+- `GET /metrics/prometheus` 供 Prometheus 抓取（`ng_http_*`、`ng_gate_*`、`ng_redis_errors_total` 等）
 - 配置 `observability.tracing.enabled: true` 启用 OpenTelemetry（默认 stdout；配置 `otlp_endpoint` 导出到 OTLP Collector）
 
 ```yaml

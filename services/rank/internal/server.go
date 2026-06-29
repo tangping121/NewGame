@@ -65,8 +65,14 @@ func (s *Server) writeScore(ctx context.Context, req *pb.RankUpdateRequest) {
 	}
 	zoneKey := rankkey.Zone(zone, req.Board)
 	globalKey := rankkey.Global(req.Board)
-	_ = s.redis.ZAdd(ctx, zoneKey, score).Err()
-	_ = s.redis.ZAdd(ctx, globalKey, score).Err()
+	if err := s.redis.ZAdd(ctx, zoneKey, score).Err(); err != nil {
+		redisx.RecordError("rank", "zadd_zone")
+		s.log.Warn("rank zadd zone failed", zap.String("key", zoneKey), zap.Error(err))
+	}
+	if err := s.redis.ZAdd(ctx, globalKey, score).Err(); err != nil {
+		redisx.RecordError("rank", "zadd_global")
+		s.log.Warn("rank zadd global failed", zap.String("key", globalKey), zap.Error(err))
+	}
 	s.keys.Store(zoneKey, struct{}{})
 	s.keys.Store(globalKey, struct{}{})
 }

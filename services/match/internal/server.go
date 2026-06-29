@@ -36,12 +36,12 @@ const roomTTL = 10 * time.Minute
 type Server struct {
 	cfg       config.Service
 	log       *zap.Logger
-	disc      *discovery.Registry
+	resolver  *discovery.Resolver // Battle 实例解析 TTL 缓存
 	redis     goredis.UniversalClient
 	crossPool *CrossPool
-	poolsMu   sync.Mutex            // 保护 pools（本地等待队列）
+	poolsMu   sync.Mutex // 保护 pools（本地等待队列）
 	pools     map[int32][]int64
-	roomsMu   sync.Mutex            // 保护 rooms
+	roomsMu   sync.Mutex // 保护 rooms
 	rooms     map[string]*roomEntry
 }
 
@@ -50,16 +50,16 @@ func New(cfgPath string) (*Server, error) {
 	if err := config.Load(cfgPath, &cfg); err != nil {
 		return nil, err
 	}
-	var disc *discovery.Registry
+	var resolver *discovery.Resolver
 	var rdb goredis.UniversalClient
 	if cfg.Infra.Redis != "" {
 		rdb = redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
-		disc = discovery.NewRegistry(rdb, cfg.Discovery.TTL())
+		resolver = discovery.NewResolver(discovery.NewRegistry(rdb, cfg.Discovery.TTL()), 2*time.Second)
 	}
 	s := &Server{
 		cfg:       cfg,
 		log:       log.New(cfg.LogLevel),
-		disc:      disc,
+		resolver:  resolver,
 		redis:     rdb,
 		crossPool: NewCrossPool(rdb),
 		pools:     make(map[int32][]int64),
@@ -221,14 +221,18 @@ func (s *Server) createBattleRoom(ctx context.Context, members []int64) (string,
 	return out.RoomID, nil
 }
 
+// battleURL 解析 Battle 服务 HTTP 基址。
+//
+// 优先 ResolveGlobal（跨区 Battle）；失败再 Resolve 本区；均无则本地回退。
 func (s *Server) battleURL(ctx context.Context) string {
-	if s.disc != nil && s.cfg.Discovery.Enabled {
-		if inst, err := s.disc.PickHealthyGlobal(ctx, "battle"); err == nil {
+	if s.resolver != nil && s.cfg.Discovery.Enabled {
+		if inst, ok := s.resolver.ResolveGlobal(ctx, "battle"); ok {
 			return inst.HTTPBase()
 		}
-		if inst, err := s.disc.PickHealthy(ctx, "battle", s.cfg.ZoneID); err == nil {
+		if inst, ok := s.resolver.Resolve(ctx, "battle", s.cfg.ZoneID); ok {
 			return inst.HTTPBase()
 		}
+		s.log.Warn("battle discovery failed", zap.Int32("zone", s.cfg.ZoneID))
 	}
 	return "http://127.0.0.1:9300"
 }

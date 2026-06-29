@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"newgame/pkg/redis"
+
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -91,8 +93,13 @@ func (s *Service) Attack(ctx context.Context, guildID, damage int64) (State, err
 		s.mem[guildID] += damage
 		return s.State(ctx)
 	}
-	_ = s.redis.SetNX(ctx, seasonKey, 1, 0).Err()
-	_ = s.redis.ZIncrBy(ctx, scoreKey, float64(damage), strconv.FormatInt(guildID, 10)).Err()
+	if err := s.redis.SetNX(ctx, seasonKey, 1, 0).Err(); err != nil {
+		redis.RecordError("guildwar", "season_init")
+	}
+	if err := s.redis.ZIncrBy(ctx, scoreKey, float64(damage), strconv.FormatInt(guildID, 10)).Err(); err != nil {
+		redis.RecordError("guildwar", "zincr")
+		return State{}, err
+	}
 	return s.State(ctx)
 }
 

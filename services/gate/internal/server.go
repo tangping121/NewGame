@@ -188,67 +188,95 @@ func (s *Server) acceptLoop(ln net.Listener, wg *sync.WaitGroup) error {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
+	// connCtx 绑定连接生命周期：读协程退出或写失败时 cancel，
+	// 使进行中的 Game 转发（forwardGame）能提前结束，避免断线后仍占用 Game 算力。
+	connCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	defer conn.Close()
+
 	st := &connState{}
 	cc := &clientConn{conn: conn, writeTimeout: s.cfg.Gate.WriteTimeout()}
 	defer func() {
 		if st.authed && st.roleID > 0 {
 			s.conns.Delete(st.roleID)
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = presence.Remove(ctx, s.redis, st.roleID)
-			_ = s.gameCli.Logout(ctx, st.roleID) // 通知 Game 卸载 Actor，避免内存泄漏
-			cancel()
+			ctx, c := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := presence.Remove(ctx, s.redis, st.roleID); err != nil {
+				redisx.RecordError("gate", "presence_remove")
+				s.log.Warn("presence remove failed", zap.Int64("role", st.roleID), zap.Error(err))
+			}
+			if err := s.gameCli.Logout(ctx, st.roleID); err != nil {
+				s.log.Warn("game logout failed", zap.Int64("role", st.roleID), zap.Error(err))
+			}
+			c()
 		}
 	}()
-	reader := bufio.NewReader(conn)
-	// 复用 header 与 body 缓冲，避免每帧两次分配带来的 GC 压力。
-	hdr := make([]byte, 2)
-	var body []byte
+
 	readTimeout := s.cfg.Gate.ReadTimeout()
-	rate := s.cfg.Gate.MsgRate() // 单连接每秒消息上限
-	var winStart time.Time
-	var winCount int
-	for {
-		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
-		if _, err := io.ReadFull(reader, hdr); err != nil {
-			return
-		}
-		size := int(hdr[0])<<8 | int(hdr[1])
-		if size < protocol.HeaderSize || size > 65535 {
-			return
-		}
-		if cap(body) < size {
-			body = make([]byte, size)
-		} else {
-			body = body[:size]
-		}
-		copy(body[0:2], hdr)
-		if _, err := io.ReadFull(reader, body[2:]); err != nil {
-			return
-		}
-		frame, err := protocol.Decode(body[2:])
-		if err != nil {
-			return
-		}
-		// 单连接限速：超过阈值的帧直接回错误，防止单连接刷包。
-		if rate > 0 {
-			now := time.Now()
-			if now.Sub(winStart) >= time.Second {
-				winStart = now
-				winCount = 0
+	rate := s.cfg.Gate.MsgRate()
+	frames := make(chan protocol.Frame, 8)
+
+	// 独立读协程：客户端断线时关闭 channel 并 cancel connCtx，中断进行中的 Game 转发。
+	go func() {
+		defer close(frames)
+		defer cancel()
+		reader := bufio.NewReader(conn)
+		hdr := make([]byte, 2)
+		var body []byte
+		var winStart time.Time
+		var winCount int
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+			if _, err := io.ReadFull(reader, hdr); err != nil {
+				return
 			}
-			winCount++
-			if winCount > rate {
-				_ = cc.write(errFrame(frame, errors.CodeInvalidParam, "rate limited"))
-				continue
+			size := int(hdr[0])<<8 | int(hdr[1])
+			if size < protocol.HeaderSize || size > 65535 {
+				return
+			}
+			if cap(body) < size {
+				body = make([]byte, size)
+			} else {
+				body = body[:size]
+			}
+			copy(body[0:2], hdr)
+			if _, err := io.ReadFull(reader, body[2:]); err != nil {
+				return
+			}
+			frame, err := protocol.Decode(body[2:])
+			if err != nil {
+				return
+			}
+			if rate > 0 {
+				now := time.Now()
+				if now.Sub(winStart) >= time.Second {
+					winStart = now
+					winCount = 0
+				}
+				winCount++
+				if winCount > rate {
+					select {
+					case frames <- errFrame(frame, errors.CodeInvalidParam, "rate limited"):
+					case <-connCtx.Done():
+					}
+					continue
+				}
+			}
+			select {
+			case frames <- frame:
+			case <-connCtx.Done():
+				return
 			}
 		}
+	}()
+
+	for frame := range frames {
 		wasAuthed := st.authed
-		resp := s.dispatch(context.Background(), st, frame)
+		resp := s.dispatch(connCtx, st, frame)
 		if !wasAuthed && st.authed && st.roleID > 0 {
-			s.conns.Store(st.roleID, cc) // 登录成功后登记连接，供 /internal/push 使用
+			s.conns.Store(st.roleID, cc)
 		}
 		if err := cc.write(resp); err != nil {
+			cancel()
 			return
 		}
 	}
@@ -294,7 +322,10 @@ func (s *Server) dispatch(ctx context.Context, st *connState, f protocol.Frame) 
 	switch f.Cmd {
 	case protocol.CmdPing:
 		if st.authed && st.roleID > 0 {
-			_ = presence.Renew(ctx, s.redis, st.roleID, 24*time.Hour)
+			if err := presence.Renew(ctx, s.redis, st.roleID, 24*time.Hour); err != nil {
+				redisx.RecordError("gate", "presence_renew")
+				s.log.Debug("presence renew failed", zap.Int64("role", st.roleID), zap.Error(err))
+			}
 		}
 		return protocol.Frame{Cmd: f.Cmd, Act: f.Act, Body: []byte(`{"pong":true}`)}
 	case protocol.CmdLogin:
@@ -334,14 +365,17 @@ func (s *Server) handleLogin(ctx context.Context, st *connState, f protocol.Fram
 		shardCount = 1
 	}
 	shardID := shard.ForRole(st.roleID, shardCount)
-	_ = presence.Store(ctx, s.redis, presence.Record{
+	if err := presence.Store(ctx, s.redis, presence.Record{
 		RoleID:   st.roleID,
 		ZoneID:   st.zoneID,
 		ShardID:  shardID,
 		GateID:   s.gateInst,
 		GateAddr: discovery.PublishAddr(s.cfg.TCPAddr),
 		GateHTTP: s.gateHTTP,
-	}, 24*time.Hour)
+	}, 24*time.Hour); err != nil {
+		redisx.RecordError("gate", "presence_store")
+		s.log.Warn("presence store failed", zap.Int64("role", st.roleID), zap.Error(err))
+	}
 	return protocol.Frame{
 		Cmd:  f.Cmd,
 		Act:  f.Act,
@@ -350,6 +384,9 @@ func (s *Server) handleLogin(ctx context.Context, st *connState, f protocol.Fram
 }
 
 // forwardGame CmdGame(2)+Act*：按 game_transport 经 HTTP 连接池或 gRPC 转发至 Game 分片。
+//
+// ctx 来自连接级 connCtx：客户端断线时读协程 cancel，进行中的转发会随 ctx 提前结束
+// （另受 gate.forward_timeout 硬上限约束）。
 func (s *Server) forwardGame(ctx context.Context, st *connState, f protocol.Frame) protocol.Frame {
 	target := s.gameTarget(ctx, st.roleID, st.zoneID)
 	if target == "" {

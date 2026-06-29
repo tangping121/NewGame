@@ -27,12 +27,12 @@ import (
 )
 
 type Server struct {
-	cfg     config.Service
-	log     *zap.Logger
-	redis   goredis.UniversalClient
-	pool    *pgxpool.Pool
+	cfg      config.Service
+	log      *zap.Logger
+	redis    goredis.UniversalClient
+	pool     *pgxpool.Pool
 	accounts *repo.AccountRepo
-	disc    *discovery.Registry
+	resolver *discovery.Resolver // Gate 地址解析 TTL 缓存，避免登录高峰反复健康探测
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -60,13 +60,14 @@ func New(cfgPath string) (*Server, error) {
 	if pool != nil {
 		accounts = repo.NewAccountRepo(pool)
 	}
+	reg := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
 	return &Server{
 		cfg:      cfg,
 		log:      logger,
 		redis:    rdb,
 		pool:     pool,
 		accounts: accounts,
-		disc:     discovery.NewRegistry(rdb, cfg.Discovery.TTL()),
+		resolver: discovery.NewResolver(reg, 2*time.Second),
 	}, nil
 }
 
@@ -171,8 +172,9 @@ func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 	var list []map[string]any
 	for _, z := range zone.Catalog {
 		entry := map[string]any{"id": z.ID, "name": z.Name}
-		if s.disc != nil && s.cfg.Discovery.Enabled {
-			if inst, err := s.disc.PickHealthy(r.Context(), "gate", z.ID); err == nil {
+		if s.resolver != nil && s.cfg.Discovery.Enabled {
+			// 区服列表接口会遍历所有区，使用 Resolver 缓存降低 Redis/健康检查压力。
+			if inst, ok := s.resolver.Resolve(r.Context(), "gate", z.ID); ok {
 				entry["gate_addr"] = inst.TCPAddr
 				entry["online"] = true
 			} else {
@@ -185,12 +187,14 @@ func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 }
 
 // gateAddr 通过服务发现获取目标区服的 Gate TCP 地址。
+//
+// 优先走 Resolver 缓存（默认 TTL 2s）；发现失败时回退到本地开发端口。
 func (s *Server) gateAddr(ctx context.Context, zoneID int32) string {
 	if zoneID == 0 {
 		zoneID = s.cfg.ZoneID
 	}
-	if s.disc != nil && s.cfg.Discovery.Enabled {
-		if inst, err := s.disc.PickHealthy(ctx, "gate", zoneID); err == nil && inst.TCPAddr != "" {
+	if s.resolver != nil && s.cfg.Discovery.Enabled {
+		if inst, ok := s.resolver.Resolve(ctx, "gate", zoneID); ok && inst.TCPAddr != "" {
 			return inst.TCPAddr
 		}
 		s.log.Warn("gate discovery failed", zap.Int32("zone", zoneID))

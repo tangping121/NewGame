@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"newgame/pkg/app"
@@ -20,11 +21,15 @@ import (
 
 const globalChannel = "global:world"
 
+// maxMemChatMessages 无 Postgres 时内存聊天总条数上限，超出则丢弃最旧消息。
+const maxMemChatMessages = 1000
+
 type Server struct {
 	cfg     config.Service
 	log     *zap.Logger
 	social  *repo.SocialRepo
-	memChat []map[string]any
+	memMu   sync.Mutex       // 保护 memChat（无 DB 时的开发回退）
+	memChat []map[string]any // 仅 social==nil 时使用；生产应接 Postgres
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -116,9 +121,13 @@ func (s *Server) chatSend(w http.ResponseWriter, r *http.Request, channel string
 		text = fmt.Sprintf("[z%d] %s", req.ZoneId, req.Text)
 	}
 	if s.social != nil {
-		_ = s.social.InsertChat(r.Context(), channel, req.RoleId, text)
+		if err := s.social.InsertChat(r.Context(), channel, req.RoleId, text); err != nil {
+			s.log.Warn("chat insert failed", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	} else {
-		s.memChat = append(s.memChat, map[string]any{"channel": channel, "role_id": req.RoleId, "text": text})
+		s.appendMemChat(channel, req.RoleId, text)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "channel": channel})
 }
@@ -145,13 +154,27 @@ func (s *Server) chatList(w http.ResponseWriter, r *http.Request, channel string
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "channel": channel, "messages": list})
 		return
 	}
+	s.memMu.Lock()
 	var filtered []map[string]any
 	for _, m := range s.memChat {
 		if m["channel"] == channel || (channel == globalChannel && m["channel"] == nil) {
 			filtered = append(filtered, m)
 		}
 	}
+	s.memMu.Unlock()
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "channel": channel, "messages": filtered})
+}
+
+// appendMemChat 无 DB 时写入内存聊天，超过 maxMemChatMessages 时丢弃最旧记录。
+func (s *Server) appendMemChat(channel string, roleID int64, text string) {
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
+	s.memChat = append(s.memChat, map[string]any{
+		"channel": channel, "role_id": roleID, "text": text,
+	})
+	if len(s.memChat) > maxMemChatMessages {
+		s.memChat = s.memChat[len(s.memChat)-maxMemChatMessages:]
+	}
 }
 
 func (s *Server) Run() error {

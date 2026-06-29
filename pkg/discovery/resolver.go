@@ -36,13 +36,43 @@ func NewResolver(reg *Registry, ttl time.Duration) *Resolver {
 	return &Resolver{reg: reg, ttl: ttl, m: make(map[string]*entry)}
 }
 
+// cacheKey 生成区服级缓存键。
+func cacheKey(name string, zoneID int32) string {
+	return name + ":" + itoa(zoneID)
+}
+
+// cacheKeyGlobal 生成跨区服全局缓存键。
+func cacheKeyGlobal(name string) string {
+	return name + ":global"
+}
+
 // Resolve 返回某服务在某区服的健康实例（带缓存）。
 func (r *Resolver) Resolve(ctx context.Context, name string, zoneID int32) (Instance, bool) {
 	if r == nil || r.reg == nil {
 		return Instance{}, false
 	}
-	key := name + ":" + itoa(zoneID)
+	key := cacheKey(name, zoneID)
+	return r.resolve(ctx, key, func() (Instance, error) {
+		return r.reg.PickHealthy(ctx, name, zoneID)
+	})
+}
 
+// ResolveGlobal 从任意区服选取一个健康实例（带缓存）。
+//
+// 适用于 Battle 等跨区服单实例服务；Match 创建房间时优先调用本方法，
+// 失败时可再回退到本区 Resolve(name, zoneID)。
+func (r *Resolver) ResolveGlobal(ctx context.Context, name string) (Instance, bool) {
+	if r == nil || r.reg == nil {
+		return Instance{}, false
+	}
+	key := cacheKeyGlobal(name)
+	return r.resolve(ctx, key, func() (Instance, error) {
+		return r.reg.PickHealthyGlobal(ctx, name)
+	})
+}
+
+// resolve 通用缓存刷新逻辑：命中 TTL 直接返回；失败时 stale-on-error。
+func (r *Resolver) resolve(ctx context.Context, key string, pick func() (Instance, error)) (Instance, bool) {
 	r.mu.RLock()
 	e := r.m[key]
 	r.mu.RUnlock()
@@ -50,7 +80,7 @@ func (r *Resolver) Resolve(ctx context.Context, name string, zoneID int32) (Inst
 		return e.inst, true
 	}
 
-	inst, err := r.reg.PickHealthy(ctx, name, zoneID)
+	inst, err := pick()
 	if err != nil {
 		// 刷新失败：回退到上次缓存（即使已过期），提升可用性。
 		if e != nil && e.ok {

@@ -3,16 +3,31 @@ package player_test
 import (
 	"testing"
 
+	"newgame/pkg/protocol"
 	"newgame/pkg/repo"
 	"newgame/services/game/internal/player"
 )
 
 func TestMutatingAct(t *testing.T) {
-	if !player.MutatingAct(2, 4) {
-		t.Fatal("skill upgrade should mutate")
+	cases := []struct {
+		act    uint16
+		mutate bool
+		name   string
+	}{
+		{protocol.ActPlayerData, false, "player data"},
+		{protocol.ActSkillList, false, "skill list"},
+		{protocol.ActSkillUpgrade, true, "skill upgrade"},
+		{protocol.ActQuestList, false, "quest list"},
+		{protocol.ActQuestAccept, true, "quest accept"},
 	}
-	if player.MutatingAct(2, 1) {
-		t.Fatal("player data read should not mutate")
+	for _, c := range cases {
+		got := player.MutatingAct(protocol.CmdGame, c.act)
+		if got != c.mutate {
+			t.Fatalf("%s: mutate=%v want %v", c.name, got, c.mutate)
+		}
+	}
+	if player.MutatingAct(protocol.CmdLogin, protocol.ActLogin) {
+		t.Fatal("non-game cmd should not mutate")
 	}
 }
 

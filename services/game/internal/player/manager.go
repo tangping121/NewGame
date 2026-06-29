@@ -135,7 +135,17 @@ func (m *Manager) Online() int {
 	return n
 }
 
-// MutatingAct 判断协议是否会修改玩家状态（需 ScheduleSave）。
+// MutatingAct 判断 CmdGame 下该 Act 是否会修改玩家内存状态（需 ScheduleSave）。
+//
+// CmdGame Act 与是否写库对照（新增 Act 时请同步更新本表与 persist_test）：
+//
+//	ActPlayerData(2)   false — 只读玩家快照
+//	ActSkillList(3)    false — 只读技能列表
+//	ActSkillUpgrade(4) true  — 升级技能，修改 gold/skills
+//	ActQuestList(5)    false — 只读任务列表
+//	ActQuestAccept(6)  true  — 接取任务，修改 quests
+//
+// 副本通关、公会、拍卖、支付发奖等走 Game HTTP /internal/*，由 Handler 显式 SaveNow/ScheduleSave。
 func MutatingAct(cmd, act uint16) bool {
 	if cmd != protocol.CmdGame {
 		return false
@@ -143,7 +153,10 @@ func MutatingAct(cmd, act uint16) bool {
 	switch act {
 	case protocol.ActSkillUpgrade, protocol.ActQuestAccept:
 		return true
+	case protocol.ActPlayerData, protocol.ActSkillList, protocol.ActQuestList:
+		return false
 	default:
+		// 未知 Act 默认不触发异步落库，避免误写；新增写操作 Act 须加入上方 true 分支。
 		return false
 	}
 }

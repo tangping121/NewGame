@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"newgame/pkg/redis"
+
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -71,7 +73,9 @@ func (s *Service) State(ctx context.Context) (State, error) {
 	}
 	v, err := s.redis.Get(ctx, hpKey).Result()
 	if err == goredis.Nil {
-		_ = s.redis.SetNX(ctx, hpKey, s.maxHP, 0).Err()
+		if err := s.redis.SetNX(ctx, hpKey, s.maxHP, 0).Err(); err != nil {
+			redis.RecordError("worldboss", "hp_init")
+		}
 		st.HP = s.maxHP
 	} else if err != nil {
 		return st, err
