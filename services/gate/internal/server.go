@@ -111,7 +111,7 @@ func New(cfgPath string) (*Server, error) {
 	if cfg.Discovery.Enabled {
 		srv.gateInst = discovery.InstanceFromConfig(cfg).ID
 	}
-	srv.gateHTTP = discovery.PublishAddr(cfg.HTTPAddr)
+	srv.gateHTTP = discovery.AdvertiseAddr(cfg.HTTPAddr, cfg.AdvertiseHTTPAddr)
 	return srv, nil
 }
 
@@ -370,7 +370,7 @@ func (s *Server) handleLogin(ctx context.Context, st *connState, f protocol.Fram
 		ZoneID:   st.zoneID,
 		ShardID:  shardID,
 		GateID:   s.gateInst,
-		GateAddr: discovery.PublishAddr(s.cfg.TCPAddr),
+		GateAddr: discovery.AdvertiseAddr(s.cfg.TCPAddr, s.cfg.AdvertiseTCPAddr),
 		GateHTTP: s.gateHTTP,
 	}, 24*time.Hour); err != nil {
 		redisx.RecordError("gate", "presence_store")

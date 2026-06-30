@@ -39,7 +39,7 @@ func (m *Manager) Saver() *AsyncSaver {
 	return m.saver
 }
 
-// Get 获取或懒加载玩家 Actor。
+// Get 获取或懒加载玩家 Actor；并发首次访问时保证同一 roleID 只存在一个 Actor。
 func (m *Manager) Get(ctx context.Context, roleID int64) *Actor {
 	if v, ok := m.players.Load(roleID); ok {
 		return v.(*Actor)
@@ -51,7 +51,12 @@ func (m *Manager) Get(ctx context.Context, roleID int64) *Actor {
 		}
 	}
 	p := New(roleID, snap, m.roles)
-	m.players.Store(roleID, p)
+	actual, loaded := m.players.LoadOrStore(roleID, p)
+	if loaded {
+		// 另一 goroutine 抢先完成 LoadOrStore，关闭本 goroutine 多建的 Actor 与邮箱。
+		p.Close()
+		return actual.(*Actor)
+	}
 	return p
 }
 

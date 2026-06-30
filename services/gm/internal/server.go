@@ -180,7 +180,8 @@ func (s *Server) serviceURL(ctx context.Context, name string, zoneID int32) stri
 		if inst, ok := s.resolver.Resolve(ctx, name, zoneID); ok {
 			return inst.HTTPBase()
 		}
-		if inst, err := s.disc.PickHealthyGlobal(ctx, name); err == nil {
+		// 跨区服全局服务（如部分 Battle 部署）走 ResolveGlobal 缓存。
+		if inst, ok := s.resolver.ResolveGlobal(ctx, name); ok {
 			return inst.HTTPBase()
 		}
 		s.log.Warn("service discovery failed", zap.String("name", name), zap.Int32("zone", zoneID))

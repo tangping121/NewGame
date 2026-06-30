@@ -19,6 +19,15 @@ func TestPublishAddr(t *testing.T) {
 	}
 }
 
+func TestAdvertiseAddr(t *testing.T) {
+	if got := AdvertiseAddr(":9000", "gate.example.com:9000"); got != "gate.example.com:9000" {
+		t.Fatalf("explicit advertise = %q", got)
+	}
+	if got := AdvertiseAddr("0.0.0.0:9000", ""); got != "127.0.0.1:9000" {
+		t.Fatalf("fallback publish = %q", got)
+	}
+}
+
 func TestInstanceHTTPBase(t *testing.T) {
 	inst := Instance{HTTPAddr: "127.0.0.1:9100"}
 	if got := inst.HTTPBase(); got != "http://127.0.0.1:9100" {

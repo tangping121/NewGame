@@ -32,6 +32,11 @@ spec:
               value: ":9000"
             - name: NG_HTTP_ADDR
               value: ":9001"
+            # 客户端可见地址：与 LoadBalancer 域名/高防 IP 一致，写入 Login 的 gate_addr
+            # - name: NG_ADVERTISE_TCP_ADDR
+            #   value: "gate.zone1.example.com:9000"
+            # - name: NG_ADVERTISE_HTTP_ADDR
+            #   value: "gate.zone1.example.com:9001"
             - name: NG_ZONE_ID
               value: "1"
             - name: NG_REDIS_CLUSTER

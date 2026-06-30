@@ -13,6 +13,8 @@
 
 预埋包：`pkg/shard`（分片路由）、`pkg/presence`（在线表）、`pkg/scale`（容量常量）。
 
+**生产 Gate 地址**：监听 `tcp_addr: ":9000"`，对外注册 `advertise_tcp_addr`（或 `NG_ADVERTISE_TCP_ADDR`）为 LB/域名，Login 返回的 `gate_addr` 即该地址。详见 [docs/client-integration.md](docs/client-integration.md)。
+
 ```powershell
 # 分片配置示例
 go run ./services/game/cmd -config configs/game-shard-0.yaml

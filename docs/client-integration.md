@@ -74,7 +74,17 @@
 |------|------|
 | token | 会话令牌，Gate `CmdLogin` 时提交 |
 | role_id | 角色 ID，后续逻辑以该 ID 为准 |
-| gate_addr | Gate TCP 地址，格式 `host:port` |
+| gate_addr | Gate TCP 地址，格式 `host:port`；**生产应为 LB/域名**，见下文 |
+
+**生产环境 `gate_addr`**
+
+Login 返回的 `gate_addr` 来自 Gate 服务发现注册的 `advertise_tcp_addr`（未配置时由 `tcp_addr` 推导）。部署时请：
+
+- Gate 进程 **监听** `0.0.0.0:9000`（`tcp_addr: ":9000"`）
+- **对外注册** `advertise_tcp_addr: "gate.zone1.example.com:9000"`（或云 LB 高防 IP）
+- K8s 可用环境变量 `NG_ADVERTISE_TCP_ADDR`
+
+客户端只连该入口，**不要**把 Pod 内网 IP 写入配置。详见 `configs/gate.yaml` 注释。
 
 **失败响应**：`code` 非 0，`message` 为错误说明（如 `invalid password`）。
 
@@ -407,6 +417,7 @@ go run ./tools/robot
 | 日期 | 说明 |
 |------|------|
 | 2026-06 | 初版：Login + Gate TCP + CmdGame Act 2～6 |
-| 2026-06 | Gate 连接 context 取消转发；Login/Match 发现缓存 |
+| 2026-06 | Gate 连接 context；Login/Match 发现缓存 |
+| 2026-06 | `advertise_tcp_addr` 生产 gate_addr；Manager.Get 竞态修复 |
 
 新增 `Cmd`/`Act` 时请同步更新本文档与 `pkg/protocol/frame.go` 注释。

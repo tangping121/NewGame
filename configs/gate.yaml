@@ -1,7 +1,10 @@
+# Gate 监听地址（进程 bind）；生产请另配 advertise_tcp_addr 为 LB/域名
 name: gate
 type: gate
 http_addr: ":9001"
 tcp_addr: ":9000"
+# advertise_tcp_addr: "gate.zone1.example.com:9000"   # Login 返回的 gate_addr
+# advertise_http_addr: "gate.zone1.example.com:9001" # 跨分片 /internal/push
 zone_id: 1
 zone_mode: dedicated
 max_conn_per_ip: 32

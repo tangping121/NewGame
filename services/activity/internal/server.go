@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"newgame/pkg/app"
@@ -21,11 +22,15 @@ import (
 
 const login7DayActivity = 1001
 
+// maxMemProgressRoles 无 Postgres 时内存进度表最多保留角色数，超出则驱逐一条旧记录。
+const maxMemProgressRoles = 10000
+
 type Server struct {
 	cfg        config.Service
 	log        *zap.Logger
 	activities *repo.ActivityRepo
-	progress   map[int64]map[int32]repo.ActivityState
+	progMu     sync.RWMutex                            // 保护 progress（无 DB 时）
+	progress   map[int64]map[int32]repo.ActivityState // 仅 activities==nil 时使用
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -53,7 +58,9 @@ func New(cfgPath string) (*Server, error) {
 					Delta      int32 `json:"delta"`
 				}
 				if json.Unmarshal(m.Data, &evt) == nil {
-					_, _ = s.addProgress(context.Background(), evt.RoleId, evt.ActivityId, evt.Delta)
+					if _, err := s.addProgress(context.Background(), evt.RoleId, evt.ActivityId, evt.Delta); err != nil {
+						s.log.Warn("activity nats progress failed", zap.Error(err))
+					}
 				}
 			})
 		}
@@ -65,7 +72,15 @@ func (s *Server) addProgress(ctx context.Context, roleID int64, activityID, delt
 	if s.activities != nil {
 		return s.activities.AddProgress(ctx, roleID, activityID, delta)
 	}
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
 	if s.progress[roleID] == nil {
+		if len(s.progress) >= maxMemProgressRoles {
+			for k := range s.progress {
+				delete(s.progress, k)
+				break
+			}
+		}
 		s.progress[roleID] = map[int32]repo.ActivityState{}
 	}
 	st := s.progress[roleID][activityID]
@@ -120,6 +135,8 @@ func (s *Server) getState(ctx context.Context, roleID int64, activityID int32) (
 	if s.activities != nil {
 		return s.activities.Get(ctx, roleID, activityID)
 	}
+	s.progMu.RLock()
+	defer s.progMu.RUnlock()
 	if s.progress[roleID] == nil {
 		return repo.ActivityState{ActivityID: activityID}, nil
 	}
@@ -130,7 +147,12 @@ func (s *Server) claim(ctx context.Context, roleID int64, activityID, need int32
 	if s.activities != nil {
 		return s.activities.Claim(ctx, roleID, activityID, need)
 	}
-	st, _ := s.getState(ctx, roleID, activityID)
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	st := repo.ActivityState{ActivityID: activityID}
+	if s.progress[roleID] != nil {
+		st = s.progress[roleID][activityID]
+	}
 	if st.Progress >= need && !st.Claimed {
 		st.Claimed = true
 		if s.progress[roleID] == nil {

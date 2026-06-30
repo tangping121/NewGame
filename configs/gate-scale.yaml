@@ -3,6 +3,8 @@ name: gate
 type: gate
 http_addr: ":9001"
 tcp_addr: ":9000"
+# advertise_tcp_addr: "gate.zone1.example.com:9000"
+# advertise_http_addr: "gate.zone1.example.com:9001"
 zone_id: 1
 zone_mode: dedicated
 max_conn_per_ip: 32

@@ -47,9 +47,12 @@ func (d Discovery) HeartbeatInterval() time.Duration {
 type Service struct {
 	Name         string        `yaml:"name"`           // 进程显示名，如 game、login
 	Type         string        `yaml:"type"`           // 服务类型，用于发现索引，如 game、gate
-	HTTPAddr     string        `yaml:"http_addr"`      // HTTP 监听地址，如 :9100
-	GRPCAddr     string        `yaml:"grpc_addr"`      // gRPC 监听地址（预留）
-	TCPAddr      string        `yaml:"tcp_addr"`       // TCP 监听地址，Gate 使用，如 :9000
+	HTTPAddr         string        `yaml:"http_addr"`          // HTTP 监听地址，如 :9100
+	GRPCAddr         string        `yaml:"grpc_addr"`          // gRPC 监听地址（预留）
+	TCPAddr          string        `yaml:"tcp_addr"`           // TCP 监听地址，Gate 使用，如 :9000
+	AdvertiseHTTPAddr string       `yaml:"advertise_http_addr"` // 对外广播的 HTTP 地址；空则用 PublishAddr(http_addr)
+	AdvertiseTCPAddr  string       `yaml:"advertise_tcp_addr"`  // 对外广播的 TCP 地址（Login gate_addr）；空则推导
+	AdvertiseGRPCAddr string       `yaml:"advertise_grpc_addr"` // 对外广播的 gRPC 地址；空则推导
 	ZoneID       int32         `yaml:"zone_id"`        // 所属区服 ID，1=一区，2=二区
 	ZoneMode     string        `yaml:"zone_mode"`      // Gate 区服模式：dedicated=校验区服；hub=跨区路由
 	MaxConnPerIP int           `yaml:"max_conn_per_ip"` // Gate 单 IP 最大并发 TCP 连接数
@@ -208,6 +211,15 @@ func (s *Service) Validate() error {
 	default:
 		return fmt.Errorf("gate.game_transport must be http_pool|grpc, got %q", s.Gate.GameTransport)
 	}
+	for _, pair := range []struct{ name, addr string }{
+		{"advertise_http_addr", s.AdvertiseHTTPAddr},
+		{"advertise_tcp_addr", s.AdvertiseTCPAddr},
+		{"advertise_grpc_addr", s.AdvertiseGRPCAddr},
+	} {
+		if pair.addr != "" && !strings.Contains(pair.addr, ":") {
+			return fmt.Errorf("%s must be host:port, got %q", pair.name, pair.addr)
+		}
+	}
 	return nil
 }
 
@@ -216,6 +228,7 @@ func (s *Service) Validate() error {
 // 支持的变量：
 //   - NG_NAME / NG_ZONE_ID
 //   - NG_HTTP_ADDR / NG_TCP_ADDR / NG_GRPC_ADDR
+//   - NG_ADVERTISE_HTTP_ADDR / NG_ADVERTISE_TCP_ADDR / NG_ADVERTISE_GRPC_ADDR
 //   - NG_SHARD_ID / NG_SHARD_COUNT；或 POD_NAME（取末尾序号作为 shard_id）
 //   - NG_REDIS / NG_REDIS_CLUSTER（逗号分隔）/ NG_NATS
 //   - NG_POSTGRES / NG_POSTGRES_SHARDS（逗号分隔）
@@ -236,6 +249,15 @@ func applyEnvOverrides(svc *Service) {
 	}
 	if v := os.Getenv("NG_GRPC_ADDR"); v != "" {
 		svc.GRPCAddr = v
+	}
+	if v := os.Getenv("NG_ADVERTISE_HTTP_ADDR"); v != "" {
+		svc.AdvertiseHTTPAddr = v
+	}
+	if v := os.Getenv("NG_ADVERTISE_TCP_ADDR"); v != "" {
+		svc.AdvertiseTCPAddr = v
+	}
+	if v := os.Getenv("NG_ADVERTISE_GRPC_ADDR"); v != "" {
+		svc.AdvertiseGRPCAddr = v
 	}
 	if v := os.Getenv("NG_SHARD_COUNT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
