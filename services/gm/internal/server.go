@@ -15,9 +15,9 @@ import (
 	"newgame/pkg/discovery"
 	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
+	redisx "newgame/pkg/redis"
 	"newgame/pkg/shard"
 	"newgame/pkg/zone"
-	redisx "newgame/pkg/redis"
 
 	"go.uber.org/zap"
 )
@@ -46,13 +46,16 @@ func New(cfgPath string) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/gm/dungeon/pass", s.handleDungeonPass)
-	mux.HandleFunc("/api/gm/mail/send", s.handleMailSend)
-	mux.HandleFunc("/api/gm/grant", s.handleGrant)
-	mux.HandleFunc("/api/gm/pay/reconcile", s.handlePayReconcile)
-	mux.HandleFunc("/api/gm/season/guildwar/reset", s.handleGuildWarReset)
-	mux.HandleFunc("/api/gm/season/worldboss/reset", s.handleWorldBossReset)
-	mux.HandleFunc("/api/gm/services", s.handleServices)
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return internalauth.HTTPMiddleware(s.cfg.InternalSecret, h)
+	}
+	mux.HandleFunc("/api/gm/dungeon/pass", auth(s.handleDungeonPass))
+	mux.HandleFunc("/api/gm/mail/send", auth(s.handleMailSend))
+	mux.HandleFunc("/api/gm/grant", auth(s.handleGrant))
+	mux.HandleFunc("/api/gm/pay/reconcile", auth(s.handlePayReconcile))
+	mux.HandleFunc("/api/gm/season/guildwar/reset", auth(s.handleGuildWarReset))
+	mux.HandleFunc("/api/gm/season/worldboss/reset", auth(s.handleWorldBossReset))
+	mux.HandleFunc("/api/gm/services", auth(s.handleServices))
 	return mux
 }
 

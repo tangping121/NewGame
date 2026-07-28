@@ -3,9 +3,13 @@ package internal
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"sync"
 	"time"
 
 	"newgame/api/pb"
@@ -14,9 +18,10 @@ import (
 	"newgame/pkg/config"
 	"newgame/pkg/db"
 	"newgame/pkg/discovery"
+	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
-	"newgame/pkg/repo"
 	redisx "newgame/pkg/redis"
+	"newgame/pkg/repo"
 
 	"go.uber.org/zap"
 )
@@ -31,11 +36,11 @@ var productRewards = map[string]string{
 }
 
 type Server struct {
-	cfg  config.Service
-	log  *zap.Logger
-	pay  *repo.PayRepo
-	game *client.GameClient
-	seq  int64
+	cfg           config.Service
+	log           *zap.Logger
+	pay           *repo.PayRepo
+	game          *client.GameClient
+	deliveryLocks [64]sync.Mutex
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -57,7 +62,7 @@ func New(cfgPath string) (*Server, error) {
 		if pool, err := db.NewPool(ctx, cfg.Infra.Postgres); err == nil {
 			s.pay = repo.NewPayRepo(pool)
 		} else {
-			logger.Warn("postgres connect failed", zap.Error(err))
+			return nil, fmt.Errorf("connect postgres: %w", err)
 		}
 	}
 	return s, nil
@@ -66,10 +71,13 @@ func New(cfgPath string) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/pay/notify", s.handleNotify)
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return internalauth.HTTPMiddleware(s.cfg.InternalSecret, h)
+	}
+	mux.HandleFunc("/api/pay/notify", auth(s.handleNotify))
 	mux.HandleFunc("/api/pay/order/create", s.handleCreate)
-	mux.HandleFunc("/api/pay/retry", s.handleRetry)
-	mux.HandleFunc("/api/pay/reconcile", s.handleReconcile)
+	mux.HandleFunc("/api/pay/retry", auth(s.handleRetry))
+	mux.HandleFunc("/api/pay/reconcile", auth(s.handleReconcile))
 	return mux
 }
 
@@ -83,12 +91,24 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
 	}
-	s.seq++
-	orderID := fmt.Sprintf("ord_%d_%d", req.RoleId, s.seq)
-	if s.pay != nil {
-		_ = s.pay.CreateOrder(r.Context(), repo.Order{
-			ID: orderID, RoleID: req.RoleId, ProductID: req.ProductId, Amount: req.Amount, Status: repo.OrderStatusPending,
-		})
+	if req.RoleId <= 0 || req.Amount <= 0 || productRewards[req.ProductId] == "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001, "message": "invalid order"})
+		return
+	}
+	if s.pay == nil {
+		http.Error(w, "payment storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	orderID, err := newOrderID(req.RoleId)
+	if err != nil {
+		http.Error(w, "failed to create order id", http.StatusInternalServerError)
+		return
+	}
+	if err := s.pay.CreateOrder(r.Context(), repo.Order{
+		ID: orderID, RoleID: req.RoleId, ProductID: req.ProductId, Amount: req.Amount, Status: repo.OrderStatusPending,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "order_id": orderID})
 }
@@ -103,6 +123,13 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 		return
 	}
+	if req.OrderId == "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001, "message": "order_id required"})
+		return
+	}
+	lock := s.deliveryLock(req.OrderId)
+	lock.Lock()
+	defer lock.Unlock()
 	order, _, err := s.loadOrder(r.Context(), &req)
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": err.Error()})
@@ -126,9 +153,7 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadOrder(ctx context.Context, req *pb.PayNotifyRequest) (repo.Order, bool, error) {
 	if s.pay == nil {
-		return repo.Order{
-			ID: req.OrderId, RoleID: req.RoleId, ProductID: req.ProductId, Amount: req.Amount, Status: orderStatusPaid,
-		}, true, nil
+		return repo.Order{}, false, fmt.Errorf("payment storage unavailable")
 	}
 	if req.OrderId != "" {
 		return s.pay.MarkPaid(ctx, req.OrderId, req.Status)
@@ -145,7 +170,9 @@ func (s *Server) deliver(ctx context.Context, order repo.Order, orderID string) 
 		return err
 	}
 	if s.pay != nil {
-		_ = s.pay.MarkDelivered(ctx, orderID)
+		if err := s.pay.MarkDelivered(ctx, orderID); err != nil {
+			return fmt.Errorf("mark order delivered: %w", err)
+		}
 	}
 	s.log.Info("pay delivered", zap.String("order", orderID), zap.Int64("role", order.RoleID))
 	return nil
@@ -163,7 +190,14 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	var ok, fail int
 	for _, o := range list {
-		if err := s.deliver(r.Context(), o, o.ID); err != nil {
+		lock := s.deliveryLock(o.ID)
+		lock.Lock()
+		current, err := s.pay.Get(r.Context(), o.ID)
+		if err == nil && current.Status == repo.OrderStatusPaid && !current.Delivered {
+			err = s.deliver(r.Context(), current, current.ID)
+		}
+		lock.Unlock()
+		if err != nil {
 			fail++
 			s.log.Warn("pay retry failed", zap.String("order", o.ID), zap.Error(err))
 		} else {
@@ -171,6 +205,20 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "success": ok, "failed": fail})
+}
+
+func newOrderID(roleID int64) (string, error) {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ord_%d_%s", roleID, hex.EncodeToString(b[:])), nil
+}
+
+func (s *Server) deliveryLock(orderID string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(orderID))
+	return &s.deliveryLocks[h.Sum32()%uint32(len(s.deliveryLocks))]
 }
 
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {

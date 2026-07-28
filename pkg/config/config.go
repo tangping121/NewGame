@@ -232,6 +232,7 @@ func (s *Service) Validate() error {
 //   - NG_SHARD_ID / NG_SHARD_COUNT；或 POD_NAME（取末尾序号作为 shard_id）
 //   - NG_REDIS / NG_REDIS_CLUSTER（逗号分隔）/ NG_NATS
 //   - NG_POSTGRES / NG_POSTGRES_SHARDS（逗号分隔）
+//   - NG_INTERNAL_SECRET
 func applyEnvOverrides(svc *Service) {
 	if v := os.Getenv("NG_NAME"); v != "" {
 		svc.Name = v

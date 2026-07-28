@@ -132,17 +132,42 @@ func (p *Actor) Invoke(ctx context.Context, fn func(*Actor) ([]byte, error)) ([]
 }
 
 // Snapshot 导出当前内存态，供 Save 与异步落库使用。
-func (p *Actor) Snapshot() repo.RoleSnapshot {
+func (p *Actor) snapshotUnsafe() repo.RoleSnapshot {
 	qs, qp := p.Quests.ToSnapshotFields()
 	return repo.RoleSnapshot{
 		Level:     p.Level,
 		Gold:      p.Gold,
-		Bag:       p.Inv,
+		Bag:       p.Inv.Clone(),
 		Skills:    p.Skills.ToMap(),
-		Quests:    qs,
-		QuestProg: qp,
+		Quests:    cloneInt32Map(qs),
+		QuestProg: cloneInt32Map(qp),
 		GuildID:   p.GuildID,
 	}
+}
+
+func cloneInt32Map(in map[string]int32) map[string]int32 {
+	out := make(map[string]int32, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// Snapshot returns a consistent copy of the actor state.
+func (p *Actor) Snapshot() repo.RoleSnapshot {
+	var snap repo.RoleSnapshot
+	_, _ = p.mailbox.Call(context.Background(), func() ([]byte, error) {
+		snap = p.snapshotUnsafe()
+		return nil, nil
+	})
+	return snap
+}
+
+func (p *Actor) saveUnsafe(ctx context.Context) error {
+	if p.repo == nil {
+		return nil
+	}
+	return p.repo.Save(ctx, p.ID, p.snapshotUnsafe())
 }
 
 // Save 将当前 Actor 状态写入 Postgres roles 表。
@@ -155,7 +180,10 @@ func (p *Actor) Save(ctx context.Context) error {
 	if p.repo == nil {
 		return nil
 	}
-	return p.repo.Save(ctx, p.ID, p.Snapshot())
+	_, err := p.mailbox.Call(ctx, func() ([]byte, error) {
+		return nil, p.saveUnsafe(ctx)
+	})
+	return err
 }
 
 // AddGold 增加金币（amount 必须 > 0 才生效）。
@@ -201,11 +229,14 @@ func (p *Actor) SetGuild(id int64) {
 //   - ctx: 持久化上下文
 //   - b: 金币与道具包
 func (p *Actor) ApplyGrant(ctx context.Context, b grant.Bundle) error {
-	if b.Gold > 0 {
-		p.AddGold(b.Gold)
-	}
-	for item, n := range b.Items {
-		p.Inv.Add(item, n)
-	}
-	return p.Save(ctx)
+	_, err := p.Invoke(ctx, func(a *Actor) ([]byte, error) {
+		if b.Gold > 0 {
+			a.AddGold(b.Gold)
+		}
+		for item, n := range b.Items {
+			a.Inv.Add(item, n)
+		}
+		return nil, a.saveUnsafe(ctx)
+	})
+	return err
 }

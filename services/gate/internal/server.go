@@ -27,9 +27,9 @@ import (
 	"newgame/pkg/log"
 	"newgame/pkg/presence"
 	"newgame/pkg/protocol"
+	redisx "newgame/pkg/redis"
 	"newgame/pkg/session"
 	"newgame/pkg/shard"
-	redisx "newgame/pkg/redis"
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -53,8 +53,12 @@ type clientConn struct {
 func (c *clientConn) write(f protocol.Frame) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	buf, err := protocol.EncodeChecked(f)
+	if err != nil {
+		return err
+	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
-	_, err := c.conn.Write(protocol.Encode(f))
+	_, err = c.conn.Write(buf)
 	return err
 }
 
@@ -63,8 +67,8 @@ type Server struct {
 	log       *zap.Logger
 	redis     goredis.UniversalClient
 	disc      *discovery.Registry
-	resolver  *discovery.Resolver   // Game 实例解析 TTL 缓存，避免每帧健康探测
-	gameCli   *client.GameClient    // 仅用于下线通知 Game 卸载 Actor
+	resolver  *discovery.Resolver // Game 实例解析 TTL 缓存，避免每帧健康探测
+	gameCli   *client.GameClient  // 仅用于下线通知 Game 卸载 Actor
 	limiter   *connLimiter
 	forward   gateforward.Forwarder // HTTP 连接池或 gRPC 池，由 game_transport 决定
 	transport string                // "grpc" | "http_pool"
@@ -151,13 +155,19 @@ func (s *Server) Run() error {
 				errCh <- s.acceptLoop(ln, &wg)
 			}()
 		}
+		firstErr := <-errCh
+		if firstErr != nil {
+			// Unblock the remaining acceptors so the service can return the
+			// listener failure instead of hanging in accWG.Wait.
+			_ = ln.Close()
+		}
 		accWG.Wait()
 		wg.Wait() // 等待在处理的连接结束
 		if s.closing.Load() {
 			s.log.Info("gate stopped gracefully")
 			return nil
 		}
-		return <-errCh
+		return firstErr
 	})
 }
 
@@ -197,8 +207,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	st := &connState{}
 	cc := &clientConn{conn: conn, writeTimeout: s.cfg.Gate.WriteTimeout()}
 	defer func() {
-		if st.authed && st.roleID > 0 {
-			s.conns.Delete(st.roleID)
+		if st.authed && st.roleID > 0 && s.conns.CompareAndDelete(st.roleID, cc) {
 			ctx, c := context.WithTimeout(context.Background(), 3*time.Second)
 			if err := presence.Remove(ctx, s.redis, st.roleID); err != nil {
 				redisx.RecordError("gate", "presence_remove")
@@ -273,7 +282,9 @@ func (s *Server) handleConn(conn net.Conn) {
 		wasAuthed := st.authed
 		resp := s.dispatch(connCtx, st, frame)
 		if !wasAuthed && st.authed && st.roleID > 0 {
-			s.conns.Store(st.roleID, cc)
+			if previous, loaded := s.conns.Swap(st.roleID, cc); loaded && previous != cc {
+				_ = previous.(*clientConn).conn.Close()
+			}
 		}
 		if err := cc.write(resp); err != nil {
 			cancel()
@@ -343,6 +354,9 @@ func (s *Server) dispatch(ctx context.Context, st *connState, f protocol.Frame) 
 // 成功 JSON: protocol.LoginGateResponse { code:0, message, zone_id }
 // zone_mode=dedicated 时校验 session.zone_id 与本 Gate zone_id 一致。
 func (s *Server) handleLogin(ctx context.Context, st *connState, f protocol.Frame) protocol.Frame {
+	if st.authed {
+		return errFrame(f, errors.CodeInvalidParam, "already logged in")
+	}
 	var req pb.EnterGateRequest
 	if err := json.Unmarshal(f.Body, &req); err != nil || req.Token == "" {
 		return errFrame(f, errors.CodeInvalidParam, "token required")

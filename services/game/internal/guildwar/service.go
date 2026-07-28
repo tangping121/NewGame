@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"newgame/pkg/redis"
 
@@ -30,8 +31,9 @@ type State struct {
 // Service 公会战逻辑：Redis 跨服积分榜，无 Redis 时内存兜底。
 type Service struct {
 	redis  goredis.UniversalClient // Redis；nil 时用 mem
-	mem    map[int64]int64 // 内存模式：guildID -> score
-	season int64           // 内存模式当前赛季
+	mem    map[int64]int64         // 内存模式：guildID -> score
+	season int64                   // 内存模式当前赛季
+	mu     sync.RWMutex
 }
 
 // New 创建公会战服务。
@@ -49,13 +51,9 @@ func New(rdb goredis.UniversalClient) *Service {
 func (s *Service) State(ctx context.Context) (State, error) {
 	st := State{Season: 1}
 	if s.redis == nil {
-		if s.season > 0 {
-			st.Season = s.season
-		}
-		for gid, sc := range s.mem {
-			st.Top = append(st.Top, ScoreEntry{GuildID: gid, Score: float64(sc)})
-		}
-		return st, nil
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.memoryState(), nil
 	}
 	if v, err := s.redis.Get(ctx, seasonKey).Int64(); err == nil {
 		st.Season = v
@@ -87,11 +85,13 @@ func (s *Service) Attack(ctx context.Context, guildID, damage int64) (State, err
 		damage = 100
 	}
 	if s.redis == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		if s.season == 0 {
 			s.season = 1
 		}
 		s.mem[guildID] += damage
-		return s.State(ctx)
+		return s.memoryState(), nil
 	}
 	if err := s.redis.SetNX(ctx, seasonKey, 1, 0).Err(); err != nil {
 		redis.RecordError("guildwar", "season_init")
@@ -111,6 +111,8 @@ func (s *Service) Attack(ctx context.Context, guildID, damage int64) (State, err
 // 返回: 新赛季 State（Top 为空）
 func (s *Service) ResetSeason(ctx context.Context) (State, error) {
 	if s.redis == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		if s.season == 0 {
 			s.season = 1
 		}
@@ -129,4 +131,15 @@ func (s *Service) ResetSeason(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	return State{Season: season}, nil
+}
+
+func (s *Service) memoryState() State {
+	st := State{Season: 1}
+	if s.season > 0 {
+		st.Season = s.season
+	}
+	for gid, sc := range s.mem {
+		st.Top = append(st.Top, ScoreEntry{GuildID: gid, Score: float64(sc)})
+	}
+	return st
 }

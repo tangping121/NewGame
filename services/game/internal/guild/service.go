@@ -4,6 +4,7 @@ package guild
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"newgame/pkg/repo"
 )
@@ -17,9 +18,10 @@ type Guild struct {
 
 // Service 公会业务。
 type Service struct {
-	repo   *repo.GuildRepo // 公会表；nil 用 mem
-	zoneID int32           // 本 Game 进程区服（预留扩展）
+	repo   *repo.GuildRepo  // 公会表；nil 用 mem
+	zoneID int32            // 本 Game 进程区服（预留扩展）
 	mem    map[int64]*Guild // 内存模式公会表
+	mu     sync.RWMutex
 }
 
 // New 创建公会服务。
@@ -53,12 +55,14 @@ func (s *Service) Join(ctx context.Context, roleID, guildID int64) (*Guild, erro
 		members, _ := s.repo.ListMembers(ctx, guildID)
 		return &Guild{ID: g.ID, Name: g.Name, Members: members}, nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	g, ok := s.mem[guildID]
 	if !ok {
 		return nil, fmt.Errorf("guild not found")
 	}
 	g.Members = appendUnique(g.Members, roleID)
-	return g, nil
+	return cloneGuild(g), nil
 }
 
 // Info 查询公会详情与成员列表。
@@ -75,11 +79,17 @@ func (s *Service) Info(ctx context.Context, guildID int64) (*Guild, error) {
 		members, _ := s.repo.ListMembers(ctx, guildID)
 		return &Guild{ID: g.ID, Name: g.Name, Members: members}, nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	g, ok := s.mem[guildID]
 	if !ok {
 		return nil, fmt.Errorf("guild not found")
 	}
-	return g, nil
+	return cloneGuild(g), nil
+}
+
+func cloneGuild(g *Guild) *Guild {
+	return &Guild{ID: g.ID, Name: g.Name, Members: append([]int64(nil), g.Members...)}
 }
 
 func appendUnique(list []int64, id int64) []int64 {

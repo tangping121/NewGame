@@ -23,20 +23,40 @@ import (
 // 返回: Shutdown 超时或错误
 func RunHTTP(logger *zap.Logger, addr string, handler http.Handler) error {
 	handler = WrapObservability(handler, "http")
-	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	handler = http.MaxBytesHandler(handler, 1<<20) // cap request bodies at 1 MiB
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("http listening", zap.String("addr", addr))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("http serve", zap.Error(err))
+			errCh <- err
+			return
 		}
+		errCh <- nil
 	}()
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	<-ch
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return srv.Shutdown(ctx)
+	defer signal.Stop(ch)
+	select {
+	case err := <-errCh:
+		return err
+	case <-ch:
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			return err
+		}
+		return <-errCh
+	}
 }
 
 // HealthHandler 标准健康检查，返回 200 与 body "ok"。

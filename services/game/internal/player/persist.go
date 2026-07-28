@@ -2,10 +2,12 @@ package player
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	actorpkg "newgame/pkg/actor"
 	"newgame/pkg/repo"
 )
 
@@ -119,6 +121,9 @@ func (s *AsyncSaver) flushAll(ctx context.Context) {
 			defer wg.Done()
 			for a := range jobs {
 				if err := a.Save(ctx); err != nil {
+					if errors.Is(err, actorpkg.ErrClosed) {
+						continue
+					}
 					s.failed.Add(1)
 					s.Schedule(a) // 失败重入队，下个周期重试
 					continue

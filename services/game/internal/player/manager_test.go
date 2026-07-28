@@ -38,3 +38,28 @@ func TestGetConcurrentSingleActor(t *testing.T) {
 		t.Fatalf("online = %d want 1", m.Online())
 	}
 }
+
+func TestWithPlayerSerializesMutations(t *testing.T) {
+	m := player.NewManager(nil, player.PersistConfig{})
+	const operations = 100
+
+	var wg sync.WaitGroup
+	for i := 0; i < operations; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.WithPlayer(context.Background(), 42, func(a *player.Actor) error {
+				a.AddGold(1)
+				return nil
+			}); err != nil {
+				t.Errorf("WithPlayer: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := m.Get(context.Background(), 42).Snapshot().Gold; got != operations {
+		t.Fatalf("gold = %d, want %d", got, operations)
+	}
+	m.Logout(context.Background(), 42)
+}

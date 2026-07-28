@@ -3,6 +3,7 @@ package protocol
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -19,6 +20,10 @@ const (
 // 其中 len = cmd + act + payload 的总字节数（即 HeaderSize-2 + len(payload)）。
 const HeaderSize = 6
 
+const MaxFrameSize = int(^uint16(0))
+
+var ErrFrameTooLarge = errors.New("frame too large")
+
 // Frame 解码后的单帧消息。
 type Frame struct {
 	Cmd  uint16 // 命令字，如 CmdLogin、CmdGame
@@ -33,14 +38,23 @@ type Frame struct {
 //
 // 返回: 完整帧字节，前缀 2 字节为 big-endian 长度
 func Encode(f Frame) []byte {
+	buf, _ := EncodeChecked(f)
+	return buf
+}
+
+// EncodeChecked rejects payloads that cannot fit in the uint16 wire length.
+func EncodeChecked(f Frame) ([]byte, error) {
 	// n 为整帧总长（含 2 字节长度前缀）：len(2)+cmd(2)+act(2)+payload。
 	n := HeaderSize + len(f.Body)
+	if n > MaxFrameSize {
+		return nil, ErrFrameTooLarge
+	}
 	buf := make([]byte, n)
 	binary.BigEndian.PutUint16(buf[0:2], uint16(n))
 	binary.BigEndian.PutUint16(buf[2:4], f.Cmd)
 	binary.BigEndian.PutUint16(buf[4:6], f.Act)
 	copy(buf[6:], f.Body)
-	return buf
+	return buf, nil
 }
 
 // Decode 从已去掉外层 len 的帧体解析 Frame。
@@ -50,7 +64,7 @@ func Encode(f Frame) []byte {
 //
 // 返回: 解析后的 Frame；buf 过短时返回 error
 func Decode(buf []byte) (Frame, error) {
-	if len(buf) < HeaderSize {
+	if len(buf) < HeaderSize-2 {
 		return Frame{}, fmt.Errorf("frame too short")
 	}
 	f := Frame{

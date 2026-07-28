@@ -3,7 +3,9 @@ package internal
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -17,8 +19,8 @@ import (
 	"newgame/pkg/log"
 	"newgame/pkg/mq"
 	"newgame/pkg/protocol"
-	"newgame/pkg/repo"
 	redisx "newgame/pkg/redis"
+	"newgame/pkg/repo"
 	"newgame/services/game/internal/auction"
 	"newgame/services/game/internal/dungeon"
 	grantsvc "newgame/services/game/internal/grant"
@@ -27,25 +29,25 @@ import (
 	"newgame/services/game/internal/player"
 	"newgame/services/game/internal/worldboss"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/nats-io/nats.go"
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
 type Server struct {
-	cfg        config.Service
-	log        *zap.Logger
-	redis      goredis.UniversalClient
-	nats       *nats.Conn
-	players    *player.Manager
-	dungeon    *dungeon.Service
-	grant      *grantsvc.Service
-	guilds     *guild.Service
-	guildwar   *guildwar.Service
-	worldboss  *worldboss.Service
-	auction    *auction.Service
-	grpcSrv    *grpc.Server
+	cfg       config.Service
+	log       *zap.Logger
+	redis     goredis.UniversalClient
+	nats      *nats.Conn
+	players   *player.Manager
+	dungeon   *dungeon.Service
+	grant     *grantsvc.Service
+	guilds    *guild.Service
+	guildwar  *guildwar.Service
+	worldboss *worldboss.Service
+	auction   *auction.Service
+	grpcSrv   *grpc.Server
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -73,7 +75,7 @@ func New(cfgPath string) (*Server, error) {
 		// 分库模式：角色数据按 role_id 分库；公会/拍卖等全局表仍用首个库。
 		sp, err := db.NewShardedPool(ctx, cfg.Infra.PostgresShards)
 		if err != nil {
-			logger.Warn("postgres sharded connect failed", zap.Error(err))
+			return nil, fmt.Errorf("connect postgres shards: %w", err)
 		} else {
 			roles = repo.NewRoleRepoSharded(sp)
 			guilds = repo.NewGuildRepo(sp.All()[0])
@@ -83,7 +85,7 @@ func New(cfgPath string) (*Server, error) {
 	} else if cfg.Infra.Postgres != "" {
 		pool, err := db.NewPool(ctx, cfg.Infra.Postgres)
 		if err != nil {
-			logger.Warn("postgres connect failed", zap.Error(err))
+			return nil, fmt.Errorf("connect postgres: %w", err)
 		} else {
 			roles = repo.NewRoleRepo(pool)
 			guilds = repo.NewGuildRepo(pool)
@@ -134,7 +136,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/internal/worldboss/reset", auth(s.handleWorldBossReset))
 	return mux
 }
-
 
 // handlePlayerLogout POST /internal/player/logout — Gate 断开连接时通知卸载玩家 Actor。
 // 请求 JSON: { role_id }
@@ -189,13 +190,20 @@ func (s *Server) handleDungeonPass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "role_id required", http.StatusBadRequest)
 		return
 	}
-	pl := s.players.Get(r.Context(), req.RoleID)
-	result, err := s.dungeon.Pass(r.Context(), pl, req.DungeonID)
+	var result dungeon.PassResult
+	err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+		var err error
+		result, err = s.dungeon.Pass(r.Context(), pl, req.DungeonID)
+		if err != nil {
+			return err
+		}
+		_, _ = pl.Quests.AddProgress("main_1", 1)
+		return nil
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_, _ = pl.Quests.AddProgress("main_1", 1)
 	s.players.ScheduleSave(req.RoleID)
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "level": result.Level, "gold": result.Gold})
 }
@@ -203,10 +211,10 @@ func (s *Server) handleDungeonPass(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RoleID int64            `json:"role_id"`
-		Gold   int64              `json:"gold"`
-		Items  map[string]int32   `json:"items"`
-		Source string             `json:"source"`
-		Raw    string             `json:"items_raw"`
+		Gold   int64            `json:"gold"`
+		Items  map[string]int32 `json:"items"`
+		Source string           `json:"source"`
+		Raw    string           `json:"items_raw"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -231,16 +239,48 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	if b.Items == nil {
 		b.Items = map[string]int32{}
 	}
-	pl := s.players.Get(r.Context(), req.RoleID)
-	if err := s.grant.Apply(r.Context(), pl, b, req.Source); err != nil {
+	var grantKey string
+	if req.Source != "" {
+		grantKey = fmt.Sprintf("ng:grant:%x", sha256.Sum256([]byte(req.Source)))
+		claimed, err := s.redis.SetNX(r.Context(), grantKey, req.RoleID, 30*24*time.Hour).Result()
+		if err != nil {
+			http.Error(w, "grant idempotency unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !claimed {
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "duplicate": true})
+			return
+		}
+	}
+	var gold int64
+	var inventory any
+	if err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+		if err := s.grant.Apply(r.Context(), pl, b, req.Source); err != nil {
+			return err
+		}
+		gold = pl.Gold
+		inventory = pl.Inv.Clone()
+		return nil
+	}); err != nil {
+		s.releaseGrantKey(grantKey)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := s.players.SaveNow(r.Context(), req.RoleID); err != nil {
+		s.releaseGrantKey(grantKey)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "gold": pl.Gold, "bag": pl.Inv})
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "gold": gold, "bag": inventory})
+}
+
+func (s *Server) releaseGrantKey(key string) {
+	if key == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.redis.Del(ctx, key).Err()
 }
 
 func (s *Server) handleGuildJoin(w http.ResponseWriter, r *http.Request) {
@@ -257,8 +297,13 @@ func (s *Server) handleGuildJoin(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": err.Error()})
 		return
 	}
-	pl := s.players.Get(r.Context(), req.RoleID)
-	pl.SetGuild(g.ID)
+	if err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+		pl.SetGuild(g.ID)
+		return nil
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.players.ScheduleSave(req.RoleID)
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "guild_id": g.ID, "name": g.Name})
 }
@@ -296,8 +341,13 @@ func (s *Server) handleWorldBossAttack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RoleID > 0 {
-		pl := s.players.Get(r.Context(), req.RoleID)
-		pl.AddGold(10)
+		if err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+			pl.AddGold(10)
+			return nil
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.players.ScheduleSave(req.RoleID)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "boss": st})

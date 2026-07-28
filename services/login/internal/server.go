@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -16,13 +18,13 @@ import (
 	"newgame/pkg/discovery"
 	"newgame/pkg/errors"
 	"newgame/pkg/log"
+	redisx "newgame/pkg/redis"
 	"newgame/pkg/repo"
 	"newgame/pkg/session"
-	redisx "newgame/pkg/redis"
 	"newgame/pkg/zone"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/jackc/pgx/v5/pgxpool"
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -51,7 +53,7 @@ func New(cfgPath string) (*Server, error) {
 	if cfg.Infra.Postgres != "" {
 		p, err := db.NewPool(ctx, cfg.Infra.Postgres)
 		if err != nil {
-			logger.Warn("postgres connect failed", zap.Error(err))
+			return nil, fmt.Errorf("connect postgres: %w", err)
 		} else {
 			pool = p
 		}
@@ -101,7 +103,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	roleID, zoneID, err := s.resolveRole(ctx, &req)
 	if err != nil {
 		code := errors.CodeInternal
-		if err.Error() == "invalid password" {
+		if stderrors.Is(err, repo.ErrInvalidPassword) {
 			code = errors.CodeUnauthorized
 		}
 		writeJSON(w, pb.LoginResponse{Code: int32(code), Message: err.Error()})

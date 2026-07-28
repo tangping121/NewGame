@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"newgame/pkg/auth"
@@ -9,6 +10,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrInvalidPassword is returned when an existing account's password does not match.
+var ErrInvalidPassword = errors.New("invalid password")
 
 // AccountRepo 账号与区服角色的创建、登录校验。
 type AccountRepo struct {
@@ -45,16 +49,32 @@ func (r *AccountRepo) Authenticate(ctx context.Context, username, password strin
 			return 0, err
 		}
 		err = r.pool.QueryRow(ctx,
-			`INSERT INTO accounts (username, password_hash) VALUES ($1, $2) RETURNING id`,
+			`INSERT INTO accounts (username, password_hash)
+			 VALUES ($1, $2)
+			 ON CONFLICT (username) DO NOTHING
+			 RETURNING id`,
 			username, newHash,
 		).Scan(&id)
-		return id, err
+		if err == nil {
+			return id, nil
+		}
+		if err != pgx.ErrNoRows {
+			return 0, err
+		}
+		// Another request may have registered the same username concurrently.
+		// Re-read it and verify the supplied password instead of failing randomly.
+		err = r.pool.QueryRow(ctx,
+			`SELECT id, password_hash FROM accounts WHERE username = $1`, username,
+		).Scan(&id, &hash)
+		if err != nil {
+			return 0, err
+		}
 	}
 	if err != nil {
 		return 0, err
 	}
 	if !auth.CheckPassword(hash, password) {
-		return 0, fmt.Errorf("invalid password")
+		return 0, ErrInvalidPassword
 	}
 	return id, nil
 }
@@ -100,9 +120,21 @@ func (r *AccountRepo) GetOrCreateRole(ctx context.Context, accountID int64, zone
 	err = r.pool.QueryRow(ctx,
 		`INSERT INTO roles (id, account_id, zone_id, name, level)
 		 VALUES ($1, $2, $3, $4, 1)
-		 ON CONFLICT (zone_id, name) DO UPDATE SET account_id = EXCLUDED.account_id
+		 ON CONFLICT DO NOTHING
 		 RETURNING id, account_id, zone_id, name, level`,
 		roleID, accountID, zoneID, name,
 	).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level)
+	if err == pgx.ErrNoRows {
+		// A concurrent request for this account may have created the role.
+		// Never transfer a name-conflicting role from another account.
+		err = r.pool.QueryRow(ctx,
+			`SELECT id, account_id, zone_id, name, level FROM roles
+			 WHERE account_id = $1 AND zone_id = $2`,
+			accountID, zoneID,
+		).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level)
+		if err == pgx.ErrNoRows {
+			return Role{}, fmt.Errorf("role name %q is already in use in zone %d", name, zoneID)
+		}
+	}
 	return role, err
 }

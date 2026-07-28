@@ -11,9 +11,11 @@ import (
 	"newgame/api/pb"
 	"newgame/pkg/app"
 	"newgame/pkg/config"
+	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
 
 type room struct {
@@ -67,7 +69,7 @@ func (s *Server) cleanupRooms() {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/battle/room/create", s.handleCreate)
+	mux.HandleFunc("/api/battle/room/create", internalauth.HTTPMiddleware(s.cfg.InternalSecret, s.handleCreate))
 	mux.HandleFunc("/api/battle/room", s.handleGet)
 	mux.HandleFunc("/api/battle/settle", s.handleSettle)
 	return mux
@@ -99,13 +101,21 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room_id")
 	s.mu.Lock()
 	rm := s.rooms[roomID]
+	var members []int64
+	results := make(map[int64]*pb.BattleResultRequest)
+	if rm != nil {
+		members = append([]int64(nil), rm.Members...)
+		for roleID, result := range rm.Results {
+			results[roleID] = proto.Clone(result).(*pb.BattleResultRequest)
+		}
+	}
 	s.mu.Unlock()
 	if rm == nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": "room not found"})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"code": 0, "room_id": rm.ID, "members": rm.Members, "results": rm.Results,
+		"code": 0, "room_id": roomID, "members": members, "results": results,
 	})
 }
 
@@ -117,7 +127,8 @@ func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	rm := s.rooms[req.RoomId]
-	if rm != nil {
+	isMember := rm != nil && containsRole(rm.Members, req.RoleId)
+	if isMember {
 		rm.Results[req.RoleId] = req
 	}
 	done := rm != nil && len(rm.Results) >= len(rm.Members)
@@ -126,10 +137,23 @@ func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(&pb.BattleResultResponse{Code: 1003})
 		return
 	}
+	if !isMember {
+		_ = json.NewEncoder(w).Encode(&pb.BattleResultResponse{Code: 1002})
+		return
+	}
 	if done {
 		s.log.Info("battle room settled", zap.String("room_id", req.RoomId))
 	}
 	_ = json.NewEncoder(w).Encode(&pb.BattleResultResponse{Code: 0})
+}
+
+func containsRole(members []int64, roleID int64) bool {
+	for _, member := range members {
+		if member == roleID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) Run() error {

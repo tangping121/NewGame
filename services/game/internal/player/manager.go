@@ -75,6 +75,15 @@ func (m *Manager) HandleMsg(ctx context.Context, roleID int64, cmd, act uint16, 
 	return resp, nil
 }
 
+// WithPlayer serializes an operation with protocol handling and persistence.
+func (m *Manager) WithPlayer(ctx context.Context, roleID int64, fn func(*Actor) error) error {
+	pl := m.Get(ctx, roleID)
+	_, err := pl.Invoke(ctx, func(a *Actor) ([]byte, error) {
+		return nil, fn(a)
+	})
+	return err
+}
+
 // ScheduleSave 异步或同步落库（由 PersistConfig 决定）。
 func (m *Manager) ScheduleSave(roleID int64) {
 	pl := m.Get(context.Background(), roleID)
@@ -101,7 +110,11 @@ func (m *Manager) Logout(ctx context.Context, roleID int64) {
 		return
 	}
 	a := v.(*Actor)
-	_ = a.Save(ctx) // 同步落库，确保下线数据不丢
+	if m.saver != nil {
+		_ = m.saver.FlushNow(ctx, a)
+	} else {
+		_ = a.Save(ctx)
+	}
 	a.Close()
 }
 
@@ -116,7 +129,11 @@ func (m *Manager) evictLoop() {
 			if a.LastActive() < cutoff {
 				if _, loaded := m.players.LoadAndDelete(k); loaded {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					_ = a.Save(ctx)
+					if m.saver != nil {
+						_ = m.saver.FlushNow(ctx, a)
+					} else {
+						_ = a.Save(ctx)
+					}
 					cancel()
 					a.Close()
 				}

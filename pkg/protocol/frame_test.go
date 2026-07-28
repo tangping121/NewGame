@@ -2,6 +2,7 @@ package protocol_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"testing"
 
@@ -18,6 +19,29 @@ func TestEncodeDecode(t *testing.T) {
 	}
 	if out.Cmd != in.Cmd || out.Act != in.Act || !bytes.Equal(out.Body, in.Body) {
 		t.Fatalf("roundtrip mismatch: %+v", out)
+	}
+}
+
+func TestEncodeDecodeEmptyBody(t *testing.T) {
+	in := protocol.Frame{Cmd: protocol.CmdPing, Act: protocol.ActPing}
+	enc := protocol.Encode(in)
+	out, err := protocol.Decode(enc[2:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Cmd != in.Cmd || out.Act != in.Act || len(out.Body) != 0 {
+		t.Fatalf("roundtrip mismatch: %+v", out)
+	}
+}
+
+func TestEncodeRejectsOversizedFrame(t *testing.T) {
+	_, err := protocol.EncodeChecked(protocol.Frame{
+		Cmd:  protocol.CmdGame,
+		Act:  protocol.ActPlayerData,
+		Body: make([]byte, protocol.MaxFrameSize-protocol.HeaderSize+1),
+	})
+	if !errors.Is(err, protocol.ErrFrameTooLarge) {
+		t.Fatalf("expected ErrFrameTooLarge, got %v", err)
 	}
 }
 

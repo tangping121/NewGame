@@ -4,6 +4,7 @@ package auction
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"newgame/pkg/repo"
 	"newgame/services/game/internal/player"
@@ -24,6 +25,7 @@ type Service struct {
 	players *player.Manager   // 玩家 Actor，用于扣/add 物品与金币
 	mem     []Listing         // 内存模式挂牌列表
 	nextID  int64             // 内存模式自增 ID
+	mu      sync.RWMutex      // protects mem and nextID
 }
 
 // New 创建拍卖服务。
@@ -54,6 +56,8 @@ func (s *Service) List(ctx context.Context, limit int) ([]Listing, error) {
 		}
 		return out, nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return append([]Listing(nil), s.mem...), nil
 }
 
@@ -68,14 +72,24 @@ func (s *Service) List(ctx context.Context, limit int) ([]Listing, error) {
 //
 // 返回: 新挂牌；背包不足或 DB 失败时 error（失败会回滚背包）
 func (s *Service) Create(ctx context.Context, sellerRoleID int64, itemID string, qty int32, price int64) (Listing, error) {
-	if itemID == "" || qty <= 0 || price <= 0 {
+	if sellerRoleID <= 0 || itemID == "" || qty <= 0 || price <= 0 {
 		return Listing{}, fmt.Errorf("invalid listing")
 	}
-	pl := s.players.Get(ctx, sellerRoleID)
-	if !pl.Inv.Remove(itemID, qty) {
+	var removed bool
+	if err := s.players.WithPlayer(ctx, sellerRoleID, func(pl *player.Actor) error {
+		removed = pl.Inv.Remove(itemID, qty)
+		return nil
+	}); err != nil {
+		return Listing{}, err
+	}
+	if !removed {
 		return Listing{}, fmt.Errorf("insufficient items")
 	}
 	if err := s.players.SaveNow(ctx, sellerRoleID); err != nil {
+		_ = s.players.WithPlayer(ctx, sellerRoleID, func(pl *player.Actor) error {
+			pl.Inv.Add(itemID, qty)
+			return nil
+		})
 		return Listing{}, err
 	}
 	if s.repo != nil {
@@ -83,12 +97,17 @@ func (s *Service) Create(ctx context.Context, sellerRoleID int64, itemID string,
 			SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price,
 		})
 		if err != nil {
-			pl.Inv.Add(itemID, qty)
+			_ = s.players.WithPlayer(ctx, sellerRoleID, func(pl *player.Actor) error {
+				pl.Inv.Add(itemID, qty)
+				return nil
+			})
 			_ = s.players.SaveNow(ctx, sellerRoleID)
 			return Listing{}, err
 		}
 		return Listing{ID: id, SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price}, nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.nextID++
 	l := Listing{ID: s.nextID, SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price}
 	s.mem = append(s.mem, l)
@@ -104,7 +123,9 @@ func (s *Service) Create(ctx context.Context, sellerRoleID int64, itemID string,
 //
 // 返回: 成交的 Listing；不能买自己的、金币不足、已售出时 error
 func (s *Service) Buy(ctx context.Context, buyerRoleID, listingID int64) (Listing, error) {
-	buyer := s.players.Get(ctx, buyerRoleID)
+	if buyerRoleID <= 0 || listingID <= 0 {
+		return Listing{}, fmt.Errorf("invalid purchase")
+	}
 	if s.repo != nil {
 		l, err := s.repo.Get(ctx, listingID)
 		if err != nil {
@@ -116,27 +137,46 @@ func (s *Service) Buy(ctx context.Context, buyerRoleID, listingID int64) (Listin
 		if l.SellerRoleID == buyerRoleID {
 			return Listing{}, fmt.Errorf("cannot buy own listing")
 		}
-		if !buyer.SpendGold(l.Price) {
+		var paid bool
+		if err := s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
+			paid = buyer.SpendGold(l.Price)
+			if paid {
+				buyer.Inv.Add(l.ItemID, l.Qty)
+			}
+			return nil
+		}); err != nil {
+			return Listing{}, err
+		}
+		if !paid {
 			return Listing{}, fmt.Errorf("insufficient gold")
 		}
-		buyer.Inv.Add(l.ItemID, l.Qty)
 		if err := s.players.SaveNow(ctx, buyerRoleID); err != nil {
-			buyer.AddGold(l.Price)
-			buyer.Inv.Remove(l.ItemID, l.Qty)
+			_ = s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
+				buyer.AddGold(l.Price)
+				buyer.Inv.Remove(l.ItemID, l.Qty)
+				return nil
+			})
 			_ = s.players.SaveNow(ctx, buyerRoleID)
 			return Listing{}, err
 		}
 		if err := s.repo.MarkSold(ctx, listingID, buyerRoleID); err != nil {
-			buyer.AddGold(l.Price)
-			buyer.Inv.Remove(l.ItemID, l.Qty)
+			_ = s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
+				buyer.AddGold(l.Price)
+				buyer.Inv.Remove(l.ItemID, l.Qty)
+				return nil
+			})
 			_ = s.players.SaveNow(ctx, buyerRoleID)
 			return Listing{}, fmt.Errorf("listing not available")
 		}
-		seller := s.players.Get(ctx, l.SellerRoleID)
-		seller.AddGold(l.Price)
+		_ = s.players.WithPlayer(ctx, l.SellerRoleID, func(seller *player.Actor) error {
+			seller.AddGold(l.Price)
+			return nil
+		})
 		_ = s.players.SaveNow(ctx, l.SellerRoleID)
 		return Listing{ID: l.ID, SellerRoleID: l.SellerRoleID, ItemID: l.ItemID, Qty: l.Qty, Price: l.Price}, nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i, l := range s.mem {
 		if l.ID != listingID {
 			continue
@@ -144,13 +184,24 @@ func (s *Service) Buy(ctx context.Context, buyerRoleID, listingID int64) (Listin
 		if l.SellerRoleID == buyerRoleID {
 			return Listing{}, fmt.Errorf("cannot buy own listing")
 		}
-		if !buyer.SpendGold(l.Price) {
+		var paid bool
+		if err := s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
+			paid = buyer.SpendGold(l.Price)
+			if paid {
+				buyer.Inv.Add(l.ItemID, l.Qty)
+			}
+			return nil
+		}); err != nil {
+			return Listing{}, err
+		}
+		if !paid {
 			return Listing{}, fmt.Errorf("insufficient gold")
 		}
-		buyer.Inv.Add(l.ItemID, l.Qty)
 		_ = s.players.SaveNow(ctx, buyerRoleID)
-		seller := s.players.Get(ctx, l.SellerRoleID)
-		seller.AddGold(l.Price)
+		_ = s.players.WithPlayer(ctx, l.SellerRoleID, func(seller *player.Actor) error {
+			seller.AddGold(l.Price)
+			return nil
+		})
 		_ = s.players.SaveNow(ctx, l.SellerRoleID)
 		s.mem = append(s.mem[:i], s.mem[i+1:]...)
 		return l, nil

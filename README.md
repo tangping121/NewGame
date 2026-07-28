@@ -132,6 +132,16 @@ go run ./tools/robot
 - `PickHealthy` 在选取实例前会请求 `GET /health`
 - 配置项见各 `configs/*.yaml` 的 `discovery` 段
 
+## 安全配置
+
+- 生产环境必须通过 `NG_INTERNAL_SECRET`（或配置文件的 `internal_secret`）设置非空内部密钥；GM、支付回调/重试/对账、发邮件、Battle 建房及 Game `/internal/*` 会校验 `X-Internal-Token`。
+- Login、Game、Pay、Mail 配置了 PostgreSQL 时会在数据库连接失败后直接拒绝启动，避免静默降级到内存模式或绕过鉴权/幂等。
+- HTTP 请求体统一限制为 1 MiB，并启用读、写、空闲及请求头超时。
+
+```powershell
+$env:NG_INTERNAL_SECRET = "replace-with-a-long-random-secret"
+```
+
 ## 脚本
 
 | 脚本 | 说明 |

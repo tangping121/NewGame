@@ -15,6 +15,7 @@ import (
 	"newgame/pkg/app"
 	"newgame/pkg/config"
 	"newgame/pkg/discovery"
+	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
 	redisx "newgame/pkg/redis"
 
@@ -23,6 +24,8 @@ import (
 )
 
 const playersPerMatch = 2 // 匹配成功所需人数
+
+var battleHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // roomEntry 匹配生成的房间，带创建时间用于 TTL 清理。
 type roomEntry struct {
@@ -202,21 +205,33 @@ func appendUnique(pool []int64, id int64) []int64 {
 func (s *Server) createBattleRoom(ctx context.Context, members []int64) (string, error) {
 	base := s.battleURL(ctx)
 	body, _ := json.Marshal(map[string]any{"members": members})
-	resp, err := http.Post(base+"/api/battle/room/create", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/battle/room/create", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	internalauth.SetHTTP(req, s.cfg.InternalSecret)
+	resp, err := battleHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("battle returned %s: %s", resp.Status, string(responseBody))
+	}
 	var out struct {
 		Code   int32  `json:"code"`
 		RoomID string `json:"room_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(responseBody, &out); err != nil {
 		return "", err
 	}
-	if out.RoomID == "" {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("empty room_id: %s", string(b))
+	if out.Code != 0 || out.RoomID == "" {
+		return "", fmt.Errorf("battle rejected room creation: %s", string(responseBody))
 	}
 	return out.RoomID, nil
 }

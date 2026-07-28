@@ -12,13 +12,14 @@ import (
 	"newgame/api/pb"
 	"newgame/pkg/app"
 	"newgame/pkg/config"
+	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
 	"newgame/pkg/mq"
 	"newgame/pkg/rankkey"
 	redisx "newgame/pkg/redis"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/nats-io/nats.go"
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -99,7 +100,7 @@ func (s *Server) trimLoop() {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/rank/update", s.handleUpdate)
+	mux.HandleFunc("/api/rank/update", internalauth.HTTPMiddleware(s.cfg.InternalSecret, s.handleUpdate))
 	mux.HandleFunc("/api/rank/top", s.handleTop)
 	mux.HandleFunc("/api/rank/global/top", s.handleGlobalTop)
 	return mux

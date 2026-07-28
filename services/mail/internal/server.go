@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,28 +17,30 @@ import (
 	"newgame/pkg/config"
 	"newgame/pkg/db"
 	"newgame/pkg/discovery"
+	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
 	"newgame/pkg/mq"
 	"newgame/pkg/protocol"
-	"newgame/pkg/repo"
 	redisx "newgame/pkg/redis"
+	"newgame/pkg/repo"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/nats-io/nats.go"
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
 type Server struct {
-	cfg        config.Service
-	log        *zap.Logger
-	redis      goredis.UniversalClient
-	nats       *nats.Conn
-	mail       *repo.MailRepo
-	disc       *discovery.Registry
-	game       *client.GameClient
-	notify     *client.NotifyClient
-	mem        map[int64][]repo.Mail
-	nextMemID  int64
+	cfg       config.Service
+	log       *zap.Logger
+	redis     goredis.UniversalClient
+	nats      *nats.Conn
+	mail      *repo.MailRepo
+	disc      *discovery.Registry
+	game      *client.GameClient
+	notify    *client.NotifyClient
+	mem       map[int64][]repo.Mail
+	memMu     sync.RWMutex
+	nextMemID int64
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -49,10 +52,10 @@ func New(cfgPath string) (*Server, error) {
 	rdb := redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
 	disc := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
 	s := &Server{
-		cfg:   cfg,
-		log:   logger,
-		redis: rdb,
-		disc:  disc,
+		cfg:    cfg,
+		log:    logger,
+		redis:  rdb,
+		disc:   disc,
 		game:   client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret),
 		notify: client.NewNotifyClient(rdb).WithSecret(cfg.InternalSecret),
 		mem:    map[int64][]repo.Mail{},
@@ -63,7 +66,7 @@ func New(cfgPath string) (*Server, error) {
 		if pool, err := db.NewPool(ctx, cfg.Infra.Postgres); err == nil {
 			s.mail = repo.NewMailRepo(pool)
 		} else {
-			logger.Warn("postgres connect failed", zap.Error(err))
+			return nil, fmt.Errorf("connect postgres: %w", err)
 		}
 	}
 	if cfg.Infra.NATS != "" {
@@ -89,7 +92,9 @@ func (s *Server) store(ctx context.Context, req *pb.MailSendRequest) error {
 	} else {
 		id := atomic.AddInt64(&s.nextMemID, 1)
 		m.ID = id
+		s.memMu.Lock()
 		s.mem[req.RoleId] = append(s.mem[req.RoleId], m)
+		s.memMu.Unlock()
 	}
 	s.pushNewMail(ctx, req.RoleId, req.Title)
 	return nil
@@ -109,7 +114,7 @@ func (s *Server) pushNewMail(ctx context.Context, roleID int64, title string) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/mail/send", s.handleSend)
+	mux.HandleFunc("/api/mail/send", internalauth.HTTPMiddleware(s.cfg.InternalSecret, s.handleSend))
 	mux.HandleFunc("/api/mail/list", s.handleList)
 	mux.HandleFunc("/api/mail/claim", s.handleClaim)
 	mux.HandleFunc("/api/mail/claim-all", s.handleClaimAll)
@@ -125,7 +130,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
 	}
-	_ = s.store(r.Context(), &req)
+	if err := s.store(r.Context(), &req); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 }
 
@@ -143,7 +151,10 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "mails": list})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "mails": s.mem[roleID]})
+	s.memMu.RLock()
+	list := append([]repo.Mail(nil), s.mem[roleID]...)
+	s.memMu.RUnlock()
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "mails": list})
 }
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
@@ -263,6 +274,8 @@ func (s *Server) claimAll(ctx context.Context, roleID int64) (claimed, failed in
 		}
 		return claimed, failed, nil
 	}
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
 	for i := range s.mem[roleID] {
 		m := &s.mem[roleID][i]
 		if m.Claimed || m.Items == "" {
@@ -282,6 +295,8 @@ func (s *Server) markRead(ctx context.Context, mailID, roleID int64) error {
 	if s.mail != nil {
 		return s.mail.MarkRead(ctx, mailID, roleID)
 	}
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
 	list := s.mem[roleID]
 	for i := range list {
 		if list[i].ID == mailID {
@@ -297,6 +312,8 @@ func (s *Server) markReadAll(ctx context.Context, roleID int64) (int64, error) {
 	if s.mail != nil {
 		return s.mail.MarkReadAll(ctx, roleID)
 	}
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
 	var n int64
 	for i := range s.mem[roleID] {
 		if !s.mem[roleID][i].Read {
@@ -311,6 +328,8 @@ func (s *Server) countUnread(ctx context.Context, roleID int64) (unread, unclaim
 	if s.mail != nil {
 		return s.mail.CountUnreadUnclaimed(ctx, roleID)
 	}
+	s.memMu.RLock()
+	defer s.memMu.RUnlock()
 	for _, m := range s.mem[roleID] {
 		if !m.Read {
 			unread++
@@ -326,6 +345,8 @@ func (s *Server) getMail(ctx context.Context, mailID, roleID int64) (repo.Mail, 
 	if s.mail != nil {
 		return s.mail.Get(ctx, mailID, roleID)
 	}
+	s.memMu.RLock()
+	defer s.memMu.RUnlock()
 	for _, m := range s.mem[roleID] {
 		if m.ID == mailID {
 			return m, nil
@@ -338,6 +359,8 @@ func (s *Server) markClaimed(ctx context.Context, mailID, roleID int64) error {
 	if s.mail != nil {
 		return s.mail.MarkClaimed(ctx, mailID)
 	}
+	s.memMu.Lock()
+	defer s.memMu.Unlock()
 	list := s.mem[roleID]
 	for i := range list {
 		if list[i].ID == mailID {
