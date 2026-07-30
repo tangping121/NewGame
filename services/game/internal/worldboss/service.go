@@ -12,8 +12,8 @@ import (
 
 const (
 	defaultHP = 100000
-	hpKey     = "ng:worldboss:hp"     // 全服共享 Boss 剩余血量 STRING
-	damageKey = "ng:worldboss:damage" // 跨区伤害榜 ZSET，member=z{zone}:{role}
+	hpKey     = "ng:worldboss:{global}:hp"     // hash tag keeps Lua keys in one cluster slot
+	damageKey = "ng:worldboss:{global}:damage" // 跨区伤害榜 ZSET，member=z{zone}:{role}
 )
 
 // attackScript 原子结算一次攻击：初始化 HP、按剩余血量限伤（不超杀）、
@@ -40,7 +40,7 @@ return newhp
 // Service 世界 Boss：全服共享 HP 与伤害排名。
 type Service struct {
 	redis goredis.UniversalClient // Redis；nil 时 Attack 返回空状态
-	maxHP int64           // Boss 最大血量
+	maxHP int64                   // Boss 最大血量
 }
 
 // New 创建世界 Boss 服务。
@@ -53,7 +53,7 @@ func New(rdb goredis.UniversalClient) *Service {
 
 // DamageEntry 伤害榜单条记录。
 type DamageEntry struct {
-	Role string  `json:"role"` // 成员键，如 z1:10001
+	Role string  `json:"role"`   // 成员键，如 z1:10001
 	Dmg  float64 `json:"damage"` // 累计伤害
 }
 

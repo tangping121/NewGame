@@ -47,11 +47,25 @@ type metricsResponseWriter struct {
 }
 
 func (w *metricsResponseWriter) WriteHeader(code int) {
+	if w.status != 0 {
+		return
+	}
 	w.status = code
 	if code >= 500 {
 		w.metrics.Errors5xx.Add(1)
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *metricsResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *metricsResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (w *metricsResponseWriter) statusCode() int {
@@ -78,7 +92,7 @@ func WithMetrics(h http.Handler, m *Metrics) http.Handler {
 		elapsed := time.Since(start)
 		m.LatencyNs.Add(uint64(elapsed.Nanoseconds()))
 		code := strconv.Itoa(mw.statusCode())
-		httpRequestsTotal.WithLabelValues(code).Inc()
-		httpRequestDuration.WithLabelValues().Observe(elapsed.Seconds())
+		httpRequestsTotal.WithLabelValues(r.Method, r.URL.Path, code).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(elapsed.Seconds())
 	})
 }

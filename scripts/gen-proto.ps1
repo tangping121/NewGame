@@ -1,6 +1,4 @@
-# 生成 Go 代码：需要 protoc 与 protoc-gen-go
-#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-
+# Generate Go protobuf and gRPC code with pinned plugin versions.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
@@ -21,8 +19,14 @@ if (-not $protoc) {
 }
 
 if (-not (Get-Command protoc-gen-go -ErrorAction SilentlyContinue)) {
-    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+}
+if (-not (Get-Command protoc-gen-go-grpc -ErrorAction SilentlyContinue)) {
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 }
 
-& $protoc --go_out=api/pb --go_opt=paths=source_relative -I api/proto api/proto/messages.proto
-Write-Host "generated api/pb/messages.pb.go"
+& $protoc `
+    --go_out=api/pb --go_opt=paths=source_relative `
+    --go-grpc_out=api/pb --go-grpc_opt=paths=source_relative,require_unimplemented_servers=false `
+    -I api/proto api/proto/messages.proto
+Write-Host "generated api/pb/messages.pb.go and api/pb/messages_grpc.pb.go"

@@ -1,0 +1,7 @@
+.git
+.github
+.gocache
+bin
+.tools
+*.exe
+deploy/k8s/secret.yaml

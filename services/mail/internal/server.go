@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +22,7 @@ import (
 	"newgame/pkg/protocol"
 	redisx "newgame/pkg/redis"
 	"newgame/pkg/repo"
+	"newgame/pkg/session"
 
 	"github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
@@ -56,12 +56,16 @@ func New(cfgPath string) (*Server, error) {
 		log:    logger,
 		redis:  rdb,
 		disc:   disc,
-		game:   client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret),
+		game:   client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 		notify: client.NewNotifyClient(rdb).WithSecret(cfg.InternalSecret),
 		mem:    map[int64][]repo.Mail{},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if err := redisx.Require(ctx, rdb, cfg.Production()); err != nil {
+		_ = rdb.Close()
+		return nil, err
+	}
 	if cfg.Infra.Postgres != "" {
 		if pool, err := db.NewPool(ctx, cfg.Infra.Postgres); err == nil {
 			s.mail = repo.NewMailRepo(pool)
@@ -72,15 +76,34 @@ func New(cfgPath string) (*Server, error) {
 	if cfg.Infra.NATS != "" {
 		if nc, err := mq.Connect(cfg.Infra.NATS); err == nil {
 			s.nats = nc
-			_, _ = nc.Subscribe(mq.SubjectMailSend, func(m *nats.Msg) {
+			if _, err := mq.SubscribeDurable(nc, mq.SubjectMailSend, "mail-v1", func(ctx context.Context, event mq.Event) error {
 				var req pb.MailSendRequest
-				if json.Unmarshal(m.Data, &req) == nil {
-					_ = s.store(context.Background(), &req)
+				if err := json.Unmarshal(event.Data, &req); err != nil {
+					return err
 				}
-			})
+				return s.storeEvent(ctx, event.EventID, &req)
+			}); err != nil {
+				nc.Close()
+				return nil, fmt.Errorf("subscribe mail stream: %w", err)
+			}
+		} else if cfg.Production() {
+			return nil, fmt.Errorf("connect nats: %w", err)
 		}
 	}
 	return s, nil
+}
+
+func (s *Server) storeEvent(ctx context.Context, eventID string, req *pb.MailSendRequest) error {
+	if s.mail == nil {
+		return s.store(ctx, req)
+	}
+	inserted, err := s.mail.InsertEvent(ctx, eventID, repo.Mail{
+		RoleID: req.RoleId, Title: req.Title, Content: req.Content, Items: req.Items,
+	})
+	if err == nil && inserted {
+		s.pushNewMail(ctx, req.RoleId, req.Title)
+	}
+	return err
 }
 
 func (s *Server) store(ctx context.Context, req *pb.MailSendRequest) error {
@@ -115,12 +138,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
 	mux.HandleFunc("/api/mail/send", internalauth.HTTPMiddleware(s.cfg.InternalSecret, s.handleSend))
-	mux.HandleFunc("/api/mail/list", s.handleList)
-	mux.HandleFunc("/api/mail/claim", s.handleClaim)
-	mux.HandleFunc("/api/mail/claim-all", s.handleClaimAll)
-	mux.HandleFunc("/api/mail/read", s.handleRead)
-	mux.HandleFunc("/api/mail/read-all", s.handleReadAll)
-	mux.HandleFunc("/api/mail/unread", s.handleUnread)
+	auth := func(h http.HandlerFunc) http.HandlerFunc { return session.HTTPMiddleware(s.redis, h) }
+	mux.HandleFunc("/api/mail/list", auth(s.handleList))
+	mux.HandleFunc("/api/mail/claim", auth(s.handleClaim))
+	mux.HandleFunc("/api/mail/claim-all", auth(s.handleClaimAll))
+	mux.HandleFunc("/api/mail/read", auth(s.handleRead))
+	mux.HandleFunc("/api/mail/read-all", auth(s.handleReadAll))
+	mux.HandleFunc("/api/mail/unread", auth(s.handleUnread))
 	return mux
 }
 
@@ -138,10 +162,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	roleID, _ := strconv.ParseInt(r.URL.Query().Get("role_id"), 10, 64)
-	if roleID == 0 {
-		roleID = 10001
-	}
+	roleID := session.RoleID(r.Context())
 	if s.mail != nil {
 		list, err := s.mail.List(r.Context(), roleID, 50)
 		if err != nil {
@@ -159,14 +180,14 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RoleId int64 `json:"role_id"`
 		MailId int64 `json:"mail_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
 	}
-	m, err := s.getMail(r.Context(), req.MailId, req.RoleId)
+	roleID := session.RoleID(r.Context())
+	m, err := s.getMail(r.Context(), req.MailId, roleID)
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": "mail not found"})
 		return
@@ -176,13 +197,13 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m.Items != "" {
-		if err := s.game.GrantItems(r.Context(), req.RoleId, m.Items, fmt.Sprintf("mail:%d", m.ID)); err != nil {
+		if err := s.game.GrantItems(r.Context(), roleID, m.Items, fmt.Sprintf("mail:%d", m.ID)); err != nil {
 			s.log.Warn("mail grant failed", zap.Error(err))
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 5000, "message": err.Error()})
 			return
 		}
 	}
-	if err := s.markClaimed(r.Context(), req.MailId, req.RoleId); err != nil {
+	if err := s.markClaimed(r.Context(), req.MailId, roleID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -190,14 +211,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClaimAll(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		RoleId int64 `json:"role_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
-		return
-	}
-	claimed, failed, err := s.claimAll(r.Context(), req.RoleId)
+	claimed, failed, err := s.claimAll(r.Context(), session.RoleID(r.Context()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -207,14 +221,13 @@ func (s *Server) handleClaimAll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RoleId int64 `json:"role_id"`
 		MailId int64 `json:"mail_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
 	}
-	if err := s.markRead(r.Context(), req.MailId, req.RoleId); err != nil {
+	if err := s.markRead(r.Context(), req.MailId, session.RoleID(r.Context())); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": err.Error()})
 		return
 	}
@@ -222,14 +235,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadAll(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		RoleId int64 `json:"role_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
-		return
-	}
-	n, err := s.markReadAll(r.Context(), req.RoleId)
+	n, err := s.markReadAll(r.Context(), session.RoleID(r.Context()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -238,10 +244,7 @@ func (s *Server) handleReadAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUnread(w http.ResponseWriter, r *http.Request) {
-	roleID, _ := strconv.ParseInt(r.URL.Query().Get("role_id"), 10, 64)
-	if roleID == 0 {
-		roleID = 10001
-	}
+	roleID := session.RoleID(r.Context())
 	unread, unclaimed, err := s.countUnread(r.Context(), roleID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -270,7 +273,9 @@ func (s *Server) claimAll(ctx context.Context, roleID int64) (claimed, failed in
 			claimed++
 		}
 		if len(ids) > 0 {
-			_ = s.mail.MarkClaimedBatch(ctx, ids)
+			if err := s.mail.MarkClaimedBatch(ctx, ids); err != nil {
+				return claimed, failed, err
+			}
 		}
 		return claimed, failed, nil
 	}
@@ -373,9 +378,14 @@ func (s *Server) markClaimed(ctx context.Context, mailID, roleID int64) error {
 }
 
 func (s *Server) Run() error {
-	ctx := context.Background()
-	_ = redisx.Ping(ctx, s.redis)
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-	})
+	closers := []app.CloseFunc{app.CloseNoContext(s.redis.Close)}
+	if s.nats != nil {
+		closers = append(closers, app.CloseNoContext(s.nats.Drain))
+	}
+	if s.mail != nil {
+		closers = append(closers, app.CloseVoid(s.mail.Close))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		return app.RunHTTPContext(ctx, s.log, s.cfg.HTTPAddr, s.Handler())
+	}, closers...)
 }

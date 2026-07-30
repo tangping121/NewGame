@@ -1,7 +1,9 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -9,17 +11,19 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
+var requestSequence atomic.Uint64
+
 var (
 	httpRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ng_http_requests_total",
 		Help: "HTTP 请求总数，按 status code 分组",
-	}, []string{"code"})
+	}, []string{"method", "path", "code"})
 
 	httpRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "ng_http_request_duration_seconds",
 		Help:    "HTTP 请求耗时（秒）",
 		Buckets: prometheus.DefBuckets,
-	}, []string{})
+	}, []string{"method", "path"})
 
 	// GateConnections 当前 Gate 在线 TCP 连接数（告警阈值约 12000/节点）。
 	GateConnections = promauto.NewGauge(prometheus.GaugeOpts{
@@ -65,11 +69,28 @@ var (
 //   - h: 业务 Handler
 //   - operation: span 名称，如 "http"
 func WrapObservability(h http.Handler, operation string) http.Handler {
+	h = withRequestBoundary(h)
 	h = WithMetrics(h, globalMetrics)
 	if tracingEnabled {
 		h = otelhttp.NewHandler(h, operation)
 	}
 	return h
+}
+
+func withRequestBoundary(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = fmt.Sprintf("req-%d", requestSequence.Add(1))
+		}
+		w.Header().Set("X-Request-ID", requestID)
+		defer func() {
+			if recover() != nil {
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // PrometheusHandler 返回标准 promhttp Handler，挂载于 /metrics/prometheus。

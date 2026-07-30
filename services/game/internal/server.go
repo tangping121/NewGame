@@ -3,7 +3,6 @@ package internal
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,9 +10,12 @@ import (
 	"strconv"
 	"time"
 
+	"newgame/api/pb"
 	"newgame/pkg/app"
+	"newgame/pkg/client"
 	"newgame/pkg/config"
 	"newgame/pkg/db"
+	"newgame/pkg/discovery"
 	"newgame/pkg/grant"
 	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
@@ -23,7 +25,6 @@ import (
 	"newgame/pkg/repo"
 	"newgame/services/game/internal/auction"
 	"newgame/services/game/internal/dungeon"
-	grantsvc "newgame/services/game/internal/grant"
 	"newgame/services/game/internal/guild"
 	"newgame/services/game/internal/guildwar"
 	"newgame/services/game/internal/player"
@@ -32,6 +33,7 @@ import (
 	"github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 )
 
@@ -42,12 +44,13 @@ type Server struct {
 	nats      *nats.Conn
 	players   *player.Manager
 	dungeon   *dungeon.Service
-	grant     *grantsvc.Service
 	guilds    *guild.Service
 	guildwar  *guildwar.Service
 	worldboss *worldboss.Service
 	auction   *auction.Service
 	grpcSrv   *grpc.Server
+	roles     *repo.RoleRepo
+	closeDB   func()
 }
 
 func New(cfgPath string) (*Server, error) {
@@ -57,10 +60,21 @@ func New(cfgPath string) (*Server, error) {
 	}
 	logger := log.New(cfg.LogLevel)
 	rdb := redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := redisx.Ping(ctx, rdb); err != nil {
+		if cfg.Production() {
+			return nil, fmt.Errorf("connect redis: %w", err)
+		}
+		logger.Warn("redis ping failed", zap.Error(err))
+	}
 	var nc *nats.Conn
 	if cfg.Infra.NATS != "" {
 		c, err := mq.Connect(cfg.Infra.NATS)
 		if err != nil {
+			if cfg.Production() {
+				return nil, fmt.Errorf("connect nats: %w", err)
+			}
 			logger.Warn("nats connect failed", zap.Error(err))
 		} else {
 			nc = c
@@ -69,8 +83,7 @@ func New(cfgPath string) (*Server, error) {
 	var roles *repo.RoleRepo
 	var guilds *repo.GuildRepo
 	var auctions *repo.AuctionRepo
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	var closeDB func()
 	if len(cfg.Infra.PostgresShards) > 0 {
 		// 分库模式：角色数据按 role_id 分库；公会/拍卖等全局表仍用首个库。
 		sp, err := db.NewShardedPool(ctx, cfg.Infra.PostgresShards)
@@ -81,6 +94,7 @@ func New(cfgPath string) (*Server, error) {
 			guilds = repo.NewGuildRepo(sp.All()[0])
 			auctions = repo.NewAuctionRepo(sp.All()[0])
 			logger.Info("postgres sharded enabled", zap.Int("shards", sp.Count()))
+			closeDB = sp.Close
 		}
 	} else if cfg.Infra.Postgres != "" {
 		pool, err := db.NewPool(ctx, cfg.Infra.Postgres)
@@ -90,13 +104,19 @@ func New(cfgPath string) (*Server, error) {
 			roles = repo.NewRoleRepo(pool)
 			guilds = repo.NewGuildRepo(pool)
 			auctions = repo.NewAuctionRepo(pool)
+			closeDB = pool.Close
 		}
 	}
 	players := player.NewManager(roles, player.PersistConfig{
 		Mode:        cfg.Scale.SaveMode,
 		Interval:    cfg.Scale.SaveInterval(),
 		Concurrency: cfg.Scale.SaveConcurrency,
+		ShardID:     cfg.Scale.ShardID,
+		ShardCount:  cfg.Scale.ShardCount,
 	})
+	registry := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
+	gameClient := client.NewGameClientSharded(registry, cfg.ZoneID, cfg.Scale.ShardCount).
+		WithSecret(cfg.InternalSecret).WithStrict(cfg.Production())
 	return &Server{
 		cfg:       cfg,
 		log:       logger,
@@ -104,11 +124,12 @@ func New(cfgPath string) (*Server, error) {
 		nats:      nc,
 		players:   players,
 		dungeon:   dungeon.New(cfg.ZoneID, nc),
-		grant:     grantsvc.New(),
 		guilds:    guild.New(guilds, cfg.ZoneID),
 		guildwar:  guildwar.New(rdb),
 		worldboss: worldboss.New(rdb),
-		auction:   auction.New(auctions, players),
+		auction:   auction.New(auctions, players, gameClient),
+		roles:     roles,
+		closeDB:   closeDB,
 	}, nil
 }
 
@@ -149,7 +170,10 @@ func (s *Server) handlePlayerLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	s.players.Logout(ctx, req.Role)
+	if err := s.players.Logout(ctx, req.Role); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 }
 
@@ -191,20 +215,29 @@ func (s *Server) handleDungeonPass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var result dungeon.PassResult
-	err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+	err := s.players.WithPlayerOutbox(r.Context(), req.RoleID, func(pl *player.Actor) (repo.OutboxEvent, error) {
 		var err error
 		result, err = s.dungeon.Pass(r.Context(), pl, req.DungeonID)
 		if err != nil {
-			return err
+			return repo.OutboxEvent{}, err
 		}
 		_, _ = pl.Quests.AddProgress("main_1", 1)
-		return nil
+		eventData, marshalErr := json.Marshal(pb.RankUpdateRequest{
+			ZoneId: s.cfg.ZoneID, RoleId: req.RoleID, Score: int64(result.Level), Board: "dungeon",
+		})
+		if marshalErr != nil {
+			return repo.OutboxEvent{}, marshalErr
+		}
+		return repo.OutboxEvent{
+			EventID: fmt.Sprintf("rank:dungeon:%d:%d", req.RoleID, result.Level),
+			Subject: mq.SubjectRankUpdate, AggregateID: strconv.FormatInt(req.RoleID, 10),
+			Payload: eventData,
+		}, nil
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.players.ScheduleSave(req.RoleID)
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "level": result.Level, "gold": result.Gold})
 }
 
@@ -239,48 +272,19 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	if b.Items == nil {
 		b.Items = map[string]int32{}
 	}
-	var grantKey string
-	if req.Source != "" {
-		grantKey = fmt.Sprintf("ng:grant:%x", sha256.Sum256([]byte(req.Source)))
-		claimed, err := s.redis.SetNX(r.Context(), grantKey, req.RoleID, 30*24*time.Hour).Result()
-		if err != nil {
-			http.Error(w, "grant idempotency unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if !claimed {
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "duplicate": true})
-			return
-		}
+	if req.Source == "" {
+		http.Error(w, "source is required for economy mutation", http.StatusBadRequest)
+		return
 	}
-	var gold int64
-	var inventory any
-	if err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
-		if err := s.grant.Apply(r.Context(), pl, b, req.Source); err != nil {
-			return err
-		}
-		gold = pl.Gold
-		inventory = pl.Inv.Clone()
-		return nil
-	}); err != nil {
-		s.releaseGrantKey(grantKey)
+	pl, applied, err := s.players.ApplyGrant(r.Context(), req.RoleID, b, req.Source)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.players.SaveNow(r.Context(), req.RoleID); err != nil {
-		s.releaseGrantKey(grantKey)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "gold": gold, "bag": inventory})
-}
-
-func (s *Server) releaseGrantKey(key string) {
-	if key == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = s.redis.Del(ctx, key).Err()
+	snap := pl.Snapshot()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code": 0, "duplicate": !applied, "gold": snap.Gold, "bag": snap.Bag,
+	})
 }
 
 func (s *Server) handleGuildJoin(w http.ResponseWriter, r *http.Request) {
@@ -297,14 +301,13 @@ func (s *Server) handleGuildJoin(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": err.Error()})
 		return
 	}
-	if err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+	if err := s.players.WithPlayerSaved(r.Context(), req.RoleID, func(pl *player.Actor) error {
 		pl.SetGuild(g.ID)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.players.ScheduleSave(req.RoleID)
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "guild_id": g.ID, "name": g.Name})
 }
 
@@ -341,14 +344,13 @@ func (s *Server) handleWorldBossAttack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RoleID > 0 {
-		if err := s.players.WithPlayer(r.Context(), req.RoleID, func(pl *player.Actor) error {
+		if err := s.players.WithPlayerSaved(r.Context(), req.RoleID, func(pl *player.Actor) error {
 			pl.AddGold(10)
 			return nil
 		}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.players.ScheduleSave(req.RoleID)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "boss": st})
 }
@@ -390,16 +392,17 @@ func (s *Server) handleAuctionList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuctionCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RoleID int64  `json:"role_id"`
-		ItemID string `json:"item_id"`
-		Qty    int32  `json:"qty"`
-		Price  int64  `json:"price"`
+		RoleID    int64  `json:"role_id"`
+		ItemID    string `json:"item_id"`
+		Qty       int32  `json:"qty"`
+		Price     int64  `json:"price"`
+		RequestID string `json:"request_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
 	}
-	l, err := s.auction.Create(r.Context(), req.RoleID, req.ItemID, req.Qty, req.Price)
+	l, err := s.auction.CreateWithKey(r.Context(), req.RoleID, req.ItemID, req.Qty, req.Price, req.RequestID)
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": err.Error()})
 		return
@@ -451,38 +454,94 @@ func (s *Server) handleWorldBossReset(w http.ResponseWriter, r *http.Request) {
 }
 
 // reportMetrics 定期把在线数、落库队列深度与累计落库次数写入 Prometheus 指标。
-func (s *Server) reportMetrics() {
+func (s *Server) reportMetrics(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	var lastSaved, lastFailed int64
-	for range ticker.C {
-		app.GameOnline.Set(float64(s.players.Online()))
-		if saver := s.players.Saver(); saver != nil {
-			app.GameSaveQueueDepth.Set(float64(saver.QueueDepth()))
-			saved, failed := saver.Stats()
-			if d := saved - lastSaved; d > 0 {
-				app.GameSaveTotal.Add(float64(d))
-				lastSaved = saved
-			}
-			if d := failed - lastFailed; d > 0 {
-				app.GameSaveFailed.Add(float64(d))
-				lastFailed = failed
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			app.GameOnline.Set(float64(s.players.Online()))
+			if saver := s.players.Saver(); saver != nil {
+				app.GameSaveQueueDepth.Set(float64(saver.QueueDepth()))
+				saved, failed := saver.Stats()
+				if d := saved - lastSaved; d > 0 {
+					app.GameSaveTotal.Add(float64(d))
+					lastSaved = saved
+				}
+				if d := failed - lastFailed; d > 0 {
+					app.GameSaveFailed.Add(float64(d))
+					lastFailed = failed
+				}
 			}
 		}
 	}
 }
 
+func (s *Server) runOutbox(ctx context.Context) {
+	if s.roles == nil || s.nats == nil {
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if err := s.publishOutboxBatch(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("publish outbox failed", zap.Error(err))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) publishOutboxBatch(ctx context.Context) error {
+	events, err := s.roles.ReserveOutbox(ctx, 100)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		if err := mq.Publish(ctx, s.nats, event.Subject, mq.Event{
+			EventID: event.EventID, AggregateID: event.AggregateID,
+			AggregateVersion: event.AggregateVersion, Data: event.Payload,
+		}); err != nil {
+			return err
+		}
+		if err := s.roles.MarkOutboxPublished(ctx, event.PoolIndex, event.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) Run() error {
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		go s.runGRPC()
-		go s.reportMetrics()
-		err := app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-		// 收到关停信号、HTTP 退出后：优雅停 gRPC + 刷盘待落库玩家，避免丢数据。
-		s.stopGRPC()
+	closers := []app.CloseFunc{app.CloseNoContext(s.redis.Close)}
+	if s.nats != nil {
+		closers = append(closers, app.CloseNoContext(s.nats.Drain))
+	}
+	if s.closeDB != nil {
+		closers = append(closers, app.CloseVoid(s.closeDB))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		group, groupCtx := errgroup.WithContext(ctx)
+		group.Go(func() error { return app.RunHTTPContext(groupCtx, s.log, s.cfg.HTTPAddr, s.Handler()) })
+		group.Go(func() error { return s.runGRPC(groupCtx) })
+		group.Go(func() error {
+			s.reportMetrics(groupCtx)
+			return nil
+		})
+		group.Go(func() error {
+			s.runOutbox(groupCtx)
+			return nil
+		})
+		err := group.Wait()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		s.players.FlushAll(ctx)
+		s.players.StopAndFlush(ctx)
 		s.log.Info("game flushed pending saves on shutdown")
 		return err
-	})
+	}, closers...)
 }

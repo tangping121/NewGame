@@ -13,6 +13,7 @@ coverage.*
 
 # 工具下载（gen-proto 临时 protoc）
 /.tools/
+/.gocache/
 
 # 依赖缓存
 /vendor/
@@ -31,3 +32,4 @@ Thumbs.db
 *.local
 .env
 .env.*
+/deploy/k8s/secret.yaml

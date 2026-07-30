@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
-	"newgame/api/pb"
 	"newgame/pkg/app"
 	"newgame/pkg/client"
 	"newgame/pkg/config"
@@ -20,9 +20,12 @@ import (
 	"newgame/pkg/discovery"
 	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
+	"newgame/pkg/payment"
 	redisx "newgame/pkg/redis"
 	"newgame/pkg/repo"
+	"newgame/pkg/session"
 
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -35,9 +38,16 @@ var productRewards = map[string]string{
 	"diamond":   "gold:200,gem:10",
 }
 
+var defaultProductPrices = map[string]int32{
+	"coin_pack": 100,
+	"starter":   600,
+	"diamond":   300,
+}
+
 type Server struct {
 	cfg           config.Service
 	log           *zap.Logger
+	redis         goredis.UniversalClient
 	pay           *repo.PayRepo
 	game          *client.GameClient
 	deliveryLocks [64]sync.Mutex
@@ -52,12 +62,17 @@ func New(cfgPath string) (*Server, error) {
 	rdb := redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
 	disc := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
 	s := &Server{
-		cfg:  cfg,
-		log:  logger,
-		game: client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret),
+		cfg:   cfg,
+		log:   logger,
+		redis: rdb,
+		game:  client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if err := redisx.Require(ctx, rdb, cfg.Production()); err != nil {
+		_ = rdb.Close()
+		return nil, err
+	}
 	if cfg.Infra.Postgres != "" {
 		if pool, err := db.NewPool(ctx, cfg.Infra.Postgres); err == nil {
 			s.pay = repo.NewPayRepo(pool)
@@ -74,8 +89,10 @@ func (s *Server) Handler() http.Handler {
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return internalauth.HTTPMiddleware(s.cfg.InternalSecret, h)
 	}
-	mux.HandleFunc("/api/pay/notify", auth(s.handleNotify))
-	mux.HandleFunc("/api/pay/order/create", s.handleCreate)
+	mux.HandleFunc("/api/pay/notify", payment.VerifyWebhook(
+		s.cfg.Payment.WebhookSecret, s.cfg.Payment.MaxSkew(), s.redis, s.handleNotify,
+	))
+	mux.HandleFunc("/api/pay/order/create", session.HTTPMiddleware(s.redis, s.handleCreate))
 	mux.HandleFunc("/api/pay/retry", auth(s.handleRetry))
 	mux.HandleFunc("/api/pay/reconcile", auth(s.handleReconcile))
 	return mux
@@ -83,15 +100,15 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RoleId    int64  `json:"role_id"`
 		ProductId string `json:"product_id"`
-		Amount    int32  `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
 	}
-	if req.RoleId <= 0 || req.Amount <= 0 || productRewards[req.ProductId] == "" {
+	roleID := session.RoleID(r.Context())
+	amount := s.productPrice(req.ProductId)
+	if roleID <= 0 || amount <= 0 || productRewards[req.ProductId] == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001, "message": "invalid order"})
 		return
 	}
@@ -99,22 +116,33 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payment storage unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	orderID, err := newOrderID(req.RoleId)
+	orderID, err := newOrderID(roleID)
 	if err != nil {
 		http.Error(w, "failed to create order id", http.StatusInternalServerError)
 		return
 	}
 	if err := s.pay.CreateOrder(r.Context(), repo.Order{
-		ID: orderID, RoleID: req.RoleId, ProductID: req.ProductId, Amount: req.Amount, Status: repo.OrderStatusPending,
+		ID: orderID, RoleID: roleID, ProductID: req.ProductId, Amount: amount,
+		Currency: s.cfg.Payment.CurrencyCode(), Status: repo.OrderStatusPending,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "order_id": orderID})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code": 0, "order_id": orderID, "amount": amount, "currency": s.cfg.Payment.CurrencyCode(),
+	})
 }
 
 func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
-	var req pb.PayNotifyRequest
+	var req struct {
+		OrderID               string `json:"order_id"`
+		RoleID                int64  `json:"role_id"`
+		ProductID             string `json:"product_id"`
+		Amount                int32  `json:"amount"`
+		Currency              string `json:"currency"`
+		Status                int32  `json:"status"`
+		ProviderTransactionID string `json:"provider_transaction_id"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001})
 		return
@@ -123,14 +151,21 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 		return
 	}
-	if req.OrderId == "" {
+	if req.OrderID == "" || req.ProviderTransactionID == "" {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001, "message": "order_id required"})
 		return
 	}
-	lock := s.deliveryLock(req.OrderId)
+	if s.pay == nil {
+		http.Error(w, "payment storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	lock := s.deliveryLock(req.OrderID)
 	lock.Lock()
 	defer lock.Unlock()
-	order, _, err := s.loadOrder(r.Context(), &req)
+	order, _, err := s.pay.MarkPaidVerified(
+		r.Context(), req.OrderID, req.ProviderTransactionID, req.ProductID,
+		strings.ToUpper(strings.TrimSpace(req.Currency)), req.Amount, req.Status,
+	)
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": err.Error()})
 		return
@@ -143,22 +178,16 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 		return
 	}
-	if err := s.deliver(r.Context(), order, req.OrderId); err != nil {
-		s.log.Error("pay deliver failed", zap.Error(err), zap.String("order", req.OrderId))
+	if req.RoleID != 0 && req.RoleID != order.RoleID {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1001, "message": "role mismatch"})
+		return
+	}
+	if err := s.deliver(r.Context(), order, req.OrderID); err != nil {
+		s.log.Error("pay deliver failed", zap.Error(err), zap.String("order", req.OrderID))
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 5000, "message": err.Error()})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
-}
-
-func (s *Server) loadOrder(ctx context.Context, req *pb.PayNotifyRequest) (repo.Order, bool, error) {
-	if s.pay == nil {
-		return repo.Order{}, false, fmt.Errorf("payment storage unavailable")
-	}
-	if req.OrderId != "" {
-		return s.pay.MarkPaid(ctx, req.OrderId, req.Status)
-	}
-	return repo.Order{}, false, fmt.Errorf("order_id required")
 }
 
 func (s *Server) deliver(ctx context.Context, order repo.Order, orderID string) error {
@@ -176,6 +205,13 @@ func (s *Server) deliver(ctx context.Context, order repo.Order, orderID string) 
 	}
 	s.log.Info("pay delivered", zap.String("order", orderID), zap.Int64("role", order.RoleID))
 	return nil
+}
+
+func (s *Server) productPrice(productID string) int32 {
+	if price := s.cfg.Payment.Products[productID]; price > 0 {
+		return price
+	}
+	return defaultProductPrices[productID]
 }
 
 func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +271,11 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Run() error {
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-	})
+	closers := []app.CloseFunc{app.CloseNoContext(s.redis.Close)}
+	if s.pay != nil {
+		closers = append(closers, app.CloseVoid(s.pay.Close))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		return app.RunHTTPContext(ctx, s.log, s.cfg.HTTPAddr, s.Handler())
+	}, closers...)
 }

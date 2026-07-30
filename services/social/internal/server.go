@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -14,8 +13,11 @@ import (
 	"newgame/pkg/config"
 	"newgame/pkg/db"
 	"newgame/pkg/log"
+	redisx "newgame/pkg/redis"
 	"newgame/pkg/repo"
+	"newgame/pkg/session"
 
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +29,7 @@ const maxMemChatMessages = 1000
 type Server struct {
 	cfg     config.Service
 	log     *zap.Logger
+	redis   goredis.UniversalClient
 	social  *repo.SocialRepo
 	memMu   sync.Mutex       // 保护 memChat（无 DB 时的开发回退）
 	memChat []map[string]any // 仅 social==nil 时使用；生产应接 Postgres
@@ -38,14 +41,18 @@ func New(cfgPath string) (*Server, error) {
 		return nil, err
 	}
 	logger := log.New(cfg.LogLevel)
-	s := &Server{cfg: cfg, log: logger}
+	s := &Server{cfg: cfg, log: logger, redis: redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if err := redisx.Require(ctx, s.redis, cfg.Production()); err != nil {
+		_ = s.redis.Close()
+		return nil, err
+	}
 	if cfg.Infra.Postgres != "" {
 		if pool, err := db.NewPool(ctx, cfg.Infra.Postgres); err == nil {
 			s.social = repo.NewSocialRepo(pool)
 		} else {
-			logger.Warn("postgres connect failed", zap.Error(err))
+			return nil, fmt.Errorf("connect postgres: %w", err)
 		}
 	}
 	return s, nil
@@ -54,34 +61,40 @@ func New(cfgPath string) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/social/friend/add", s.handleFriendAdd)
-	mux.HandleFunc("/api/social/friend/list", s.handleFriendList)
-	mux.HandleFunc("/api/social/chat/send", s.handleChatSend)
-	mux.HandleFunc("/api/social/chat/list", s.handleChatList)
-	mux.HandleFunc("/api/social/chat/global/send", s.handleGlobalChatSend)
-	mux.HandleFunc("/api/social/chat/global/list", s.handleGlobalChatList)
-	mux.HandleFunc("/api/social/guild/info", func(w http.ResponseWriter, r *http.Request) {
+	auth := func(h http.HandlerFunc) http.HandlerFunc { return session.HTTPMiddleware(s.redis, h) }
+	mux.HandleFunc("/api/social/friend/add", auth(s.handleFriendAdd))
+	mux.HandleFunc("/api/social/friend/list", auth(s.handleFriendList))
+	mux.HandleFunc("/api/social/chat/send", auth(s.handleChatSend))
+	mux.HandleFunc("/api/social/chat/list", auth(s.handleChatList))
+	mux.HandleFunc("/api/social/chat/global/send", auth(s.handleGlobalChatSend))
+	mux.HandleFunc("/api/social/chat/global/list", auth(s.handleGlobalChatList))
+	mux.HandleFunc("/api/social/guild/info", auth(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "guilds": map[int64]string{1: "default_guild"}})
-	})
+	}))
 	return mux
 }
 
 func (s *Server) handleFriendAdd(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RoleId   int64 `json:"role_id"`
 		FriendId int64 `json:"friend_id"`
-		ZoneId   int32 `json:"zone_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.FriendId <= 0 {
+		http.Error(w, "friend_id required", http.StatusBadRequest)
+		return
+	}
+	info, _ := session.FromContext(r.Context())
 	if s.social != nil {
-		_ = s.social.AddFriend(r.Context(), req.RoleId, req.FriendId)
+		if err := s.social.AddFriend(r.Context(), info.RoleID, req.FriendId); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
-	s.log.Info("cross-zone friend", zap.Int64("role", req.RoleId), zap.Int64("friend", req.FriendId), zap.Int32("zone", req.ZoneId))
+	s.log.Info("cross-zone friend", zap.Int64("role", info.RoleID), zap.Int64("friend", req.FriendId), zap.Int32("zone", info.ZoneID))
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 }
 
 func (s *Server) handleFriendList(w http.ResponseWriter, r *http.Request) {
-	roleID, _ := strconv.ParseInt(r.URL.Query().Get("role_id"), 10, 64)
+	roleID := session.RoleID(r.Context())
 	if s.social != nil {
 		list, err := s.social.ListFriends(r.Context(), roleID)
 		if err != nil {
@@ -104,12 +117,14 @@ func (s *Server) handleGlobalChatSend(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) chatSend(w http.ResponseWriter, r *http.Request, channel string) {
 	var req struct {
-		RoleId  int64  `json:"role_id"`
-		ZoneId  int32  `json:"zone_id"`
 		Channel string `json:"channel"`
 		Text    string `json:"text"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	info, _ := session.FromContext(r.Context())
 	if channel == "" {
 		channel = req.Channel
 	}
@@ -117,17 +132,17 @@ func (s *Server) chatSend(w http.ResponseWriter, r *http.Request, channel string
 		channel = "world"
 	}
 	text := req.Text
-	if req.ZoneId > 0 {
-		text = fmt.Sprintf("[z%d] %s", req.ZoneId, req.Text)
+	if info.ZoneID > 0 {
+		text = fmt.Sprintf("[z%d] %s", info.ZoneID, req.Text)
 	}
 	if s.social != nil {
-		if err := s.social.InsertChat(r.Context(), channel, req.RoleId, text); err != nil {
+		if err := s.social.InsertChat(r.Context(), channel, info.RoleID, text); err != nil {
 			s.log.Warn("chat insert failed", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	} else {
-		s.appendMemChat(channel, req.RoleId, text)
+		s.appendMemChat(channel, info.RoleID, text)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "channel": channel})
 }
@@ -179,7 +194,11 @@ func (s *Server) appendMemChat(channel string, roleID int64, text string) {
 
 func (s *Server) Run() error {
 	s.log.Info("social service ready", zap.String("addr", s.cfg.HTTPAddr))
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-	})
+	closers := []app.CloseFunc{app.CloseNoContext(s.redis.Close)}
+	if s.social != nil {
+		closers = append(closers, app.CloseVoid(s.social.Close))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		return app.RunHTTPContext(ctx, s.log, s.cfg.HTTPAddr, s.Handler())
+	}, closers...)
 }

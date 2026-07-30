@@ -84,8 +84,6 @@ func (m *Mailbox) Call(ctx context.Context, fn func() ([]byte, error)) ([]byte, 
 	select {
 	case r := <-ch:
 		return r.data, r.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
 }
 

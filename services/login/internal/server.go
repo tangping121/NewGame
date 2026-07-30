@@ -4,11 +4,13 @@ package internal
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"newgame/api/pb"
@@ -28,12 +30,24 @@ import (
 	"go.uber.org/zap"
 )
 
+const loginAttemptsPerMinute = 10
+
+var loginRateScript = goredis.NewScript(`
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], 60)
+end
+return count
+`)
+
 type Server struct {
 	cfg      config.Service
 	log      *zap.Logger
 	redis    goredis.UniversalClient
 	pool     *pgxpool.Pool
 	accounts *repo.AccountRepo
+	roles    *repo.RoleRepo
+	shards   *db.ShardedPool
 	resolver *discovery.Resolver // Gate 地址解析 TTL 缓存，避免登录高峰反复健康探测
 }
 
@@ -47,11 +61,18 @@ func New(cfgPath string) (*Server, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := redisx.Ping(ctx, rdb); err != nil {
+		if cfg.Production() {
+			return nil, fmt.Errorf("connect redis: %w", err)
+		}
 		logger.Warn("redis ping failed", zap.Error(err))
 	}
 	var pool *pgxpool.Pool
-	if cfg.Infra.Postgres != "" {
-		p, err := db.NewPool(ctx, cfg.Infra.Postgres)
+	accountDSN := cfg.Infra.Postgres
+	if accountDSN == "" && len(cfg.Infra.PostgresShards) > 0 {
+		accountDSN = cfg.Infra.PostgresShards[0]
+	}
+	if accountDSN != "" {
+		p, err := db.NewPool(ctx, accountDSN)
 		if err != nil {
 			return nil, fmt.Errorf("connect postgres: %w", err)
 		} else {
@@ -62,6 +83,18 @@ func New(cfgPath string) (*Server, error) {
 	if pool != nil {
 		accounts = repo.NewAccountRepo(pool)
 	}
+	var roles *repo.RoleRepo
+	var shards *db.ShardedPool
+	if len(cfg.Infra.PostgresShards) > 0 {
+		sp, err := db.NewShardedPool(ctx, cfg.Infra.PostgresShards)
+		if err != nil {
+			return nil, fmt.Errorf("connect role shards: %w", err)
+		}
+		shards = sp
+		roles = repo.NewRoleRepoSharded(sp)
+	} else if pool != nil {
+		roles = repo.NewRoleRepo(pool)
+	}
 	reg := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
 	return &Server{
 		cfg:      cfg,
@@ -69,6 +102,8 @@ func New(cfgPath string) (*Server, error) {
 		redis:    rdb,
 		pool:     pool,
 		accounts: accounts,
+		roles:    roles,
+		shards:   shards,
 		resolver: discovery.NewResolver(reg, 2*time.Second),
 	}, nil
 }
@@ -98,6 +133,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if req.ZoneId <= 0 {
 		req.ZoneId = s.cfg.ZoneID
 	}
+	if req.Username == "" || len(req.Username) > 64 || req.Password == "" || len(req.Password) > 72 {
+		writeJSON(w, pb.LoginResponse{
+			Code: int32(errors.CodeInvalidParam), Message: "invalid username or password length",
+		})
+		return
+	}
+	if limited, err := s.loginRateLimited(r.Context(), req.Username); err != nil {
+		if s.cfg.Production() {
+			http.Error(w, "login rate limiter unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		s.log.Warn("login rate limiter unavailable", zap.Error(err))
+	} else if limited {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		writeJSON(w, pb.LoginResponse{
+			Code: int32(errors.CodeRateLimited), Message: "too many login attempts",
+		})
+		return
+	}
 	ctx := r.Context()
 
 	roleID, zoneID, err := s.resolveRole(ctx, &req)
@@ -110,6 +165,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	gateAddr, err := s.gateAddr(ctx, zoneID)
+	if err != nil {
+		writeJSON(w, pb.LoginResponse{Code: int32(errors.CodeInternal), Message: err.Error()})
+		return
+	}
 	token, err := newToken()
 	if err != nil {
 		writeJSON(w, pb.LoginResponse{Code: int32(errors.CodeInternal), Message: err.Error()})
@@ -123,9 +183,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Code:     0,
 		Token:    token,
 		RoleId:   roleID,
-		GateAddr: s.gateAddr(ctx, zoneID),
+		GateAddr: gateAddr,
 		Message:  "ok",
 	})
+}
+
+func loginRateKey(username string) string {
+	normalized := strings.ToLower(strings.TrimSpace(username))
+	sum := sha256.Sum256([]byte(normalized))
+	return fmt.Sprintf("ng:login:rate:{%x}", sum[:16])
+}
+
+func (s *Server) loginRateLimited(ctx context.Context, username string) (bool, error) {
+	if s.redis == nil {
+		return false, fmt.Errorf("redis unavailable")
+	}
+	count, err := loginRateScript.Run(ctx, s.redis, []string{loginRateKey(username)}).Int()
+	return count > loginAttemptsPerMinute, err
 }
 
 // resolveRole 校验账号并返回该区服角色 ID。
@@ -142,9 +216,15 @@ func (s *Server) resolveRole(ctx context.Context, req *pb.LoginRequest) (roleID 
 		if err != nil {
 			return 0, 0, err
 		}
-		role, err := s.accounts.GetOrCreateRole(ctx, accountID, zoneID, req.Username)
+		role, err := s.accounts.GetOrCreateRole(ctx, accountID, zoneID, req.Username, s.cfg.Scale.ShardCount)
 		if err != nil {
 			return 0, 0, err
+		}
+		if s.roles == nil {
+			return 0, 0, fmt.Errorf("role storage unavailable")
+		}
+		if err := s.roles.Ensure(ctx, role); err != nil {
+			return 0, 0, fmt.Errorf("ensure role shard: %w", err)
 		}
 		return role.ID, zoneID, nil
 	}
@@ -191,21 +271,24 @@ func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 // gateAddr 通过服务发现获取目标区服的 Gate TCP 地址。
 //
 // 优先走 Resolver 缓存（默认 TTL 2s）；发现失败时回退到本地开发端口。
-func (s *Server) gateAddr(ctx context.Context, zoneID int32) string {
+func (s *Server) gateAddr(ctx context.Context, zoneID int32) (string, error) {
 	if zoneID == 0 {
 		zoneID = s.cfg.ZoneID
 	}
 	if s.resolver != nil && s.cfg.Discovery.Enabled {
 		if inst, ok := s.resolver.Resolve(ctx, "gate", zoneID); ok && inst.TCPAddr != "" {
-			return inst.TCPAddr
+			return inst.TCPAddr, nil
 		}
 		s.log.Warn("gate discovery failed", zap.Int32("zone", zoneID))
 	}
+	if s.cfg.Production() {
+		return "", fmt.Errorf("gate unavailable for zone %d", zoneID)
+	}
 	switch zoneID {
 	case 2:
-		return "127.0.0.1:9010"
+		return "127.0.0.1:9010", nil
 	default:
-		return "127.0.0.1:9000"
+		return "127.0.0.1:9000", nil
 	}
 }
 
@@ -223,7 +306,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func (s *Server) Run() error {
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-	})
+	closers := []app.CloseFunc{app.CloseNoContext(s.redis.Close)}
+	if s.shards != nil {
+		closers = append(closers, app.CloseVoid(s.shards.Close))
+	}
+	if s.pool != nil {
+		closers = append(closers, app.CloseVoid(s.pool.Close))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		return app.RunHTTPContext(ctx, s.log, s.cfg.HTTPAddr, s.Handler())
+	}, closers...)
 }

@@ -12,9 +12,15 @@ import (
 )
 
 const (
-	scoreKey  = "ng:guildwar:score"  // 全服公会战积分 ZSET，member=guildID
-	seasonKey = "ng:guildwar:season" // 当前赛季序号 STRING
+	scoreKey  = "ng:guildwar:{global}:score"  // one Redis Cluster slot
+	seasonKey = "ng:guildwar:{global}:season" // 当前赛季序号 STRING
 )
+
+var resetScript = goredis.NewScript(`
+local season = redis.call('INCR', KEYS[1])
+redis.call('DEL', KEYS[2])
+return season
+`)
 
 // ScoreEntry 单公会积分条目。
 type ScoreEntry struct {
@@ -120,13 +126,7 @@ func (s *Service) ResetSeason(ctx context.Context) (State, error) {
 		s.mem = map[int64]int64{}
 		return State{Season: s.season}, nil
 	}
-	pipe := s.redis.Pipeline()
-	incr := pipe.Incr(ctx, seasonKey)
-	pipe.Del(ctx, scoreKey)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return State{}, err
-	}
-	season, err := incr.Result()
+	season, err := resetScript.Run(ctx, s.redis, []string{seasonKey, scoreKey}).Int64()
 	if err != nil {
 		return State{}, err
 	}

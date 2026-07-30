@@ -3,6 +3,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -41,4 +42,18 @@ func New(addr string, clusterAddrs []string) Client {
 // Ping 检查连通性。
 func Ping(ctx context.Context, c Client) error {
 	return c.Ping(ctx).Err()
+}
+
+// Require verifies Redis at startup when a service runs in fail-closed mode.
+func Require(ctx context.Context, c Client, required bool) error {
+	if !required {
+		return nil
+	}
+	if c == nil {
+		return fmt.Errorf("redis client is required")
+	}
+	if err := Ping(ctx, c); err != nil {
+		return fmt.Errorf("connect redis: %w", err)
+	}
+	return nil
 }

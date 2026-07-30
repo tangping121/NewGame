@@ -2,7 +2,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -22,9 +24,9 @@ type Infra struct {
 
 // Discovery 基于 Redis 的服务注册与发现相关配置。
 type Discovery struct {
-	Enabled   bool `yaml:"enabled"`        // 是否启用服务注册；false 时不写入 Redis
-	TTLSec    int  `yaml:"ttl_sec"`        // 实例租约 TTL（秒），过期后自动从发现列表移除
-	Heartbeat int  `yaml:"heartbeat_sec"`  // 心跳续约间隔（秒），应小于 TTL
+	Enabled   bool `yaml:"enabled"`       // 是否启用服务注册；false 时不写入 Redis
+	TTLSec    int  `yaml:"ttl_sec"`       // 实例租约 TTL（秒），过期后自动从发现列表移除
+	Heartbeat int  `yaml:"heartbeat_sec"` // 心跳续约间隔（秒），应小于 TTL
 }
 
 // TTL 返回实例租约时长；未配置或 <=0 时默认 15 秒。
@@ -45,31 +47,71 @@ func (d Discovery) HeartbeatInterval() time.Duration {
 
 // Service 每个微服务进程的基础配置，对应 configs/*.yaml。
 type Service struct {
-	Name         string        `yaml:"name"`           // 进程显示名，如 game、login
-	Type         string        `yaml:"type"`           // 服务类型，用于发现索引，如 game、gate
-	HTTPAddr         string        `yaml:"http_addr"`          // HTTP 监听地址，如 :9100
-	GRPCAddr         string        `yaml:"grpc_addr"`          // gRPC 监听地址（预留）
-	TCPAddr          string        `yaml:"tcp_addr"`           // TCP 监听地址，Gate 使用，如 :9000
-	AdvertiseHTTPAddr string       `yaml:"advertise_http_addr"` // 对外广播的 HTTP 地址；空则用 PublishAddr(http_addr)
-	AdvertiseTCPAddr  string       `yaml:"advertise_tcp_addr"`  // 对外广播的 TCP 地址（Login gate_addr）；空则推导
-	AdvertiseGRPCAddr string       `yaml:"advertise_grpc_addr"` // 对外广播的 gRPC 地址；空则推导
-	ZoneID       int32         `yaml:"zone_id"`        // 所属区服 ID，1=一区，2=二区
-	ZoneMode     string        `yaml:"zone_mode"`      // Gate 区服模式：dedicated=校验区服；hub=跨区路由
-	MaxConnPerIP int           `yaml:"max_conn_per_ip"` // Gate 单 IP 最大并发 TCP 连接数
-	Infra        Infra         `yaml:"infra"`          // 基础设施连接
-	Discovery    Discovery     `yaml:"discovery"`      // 服务发现配置
-	Observability Observability `yaml:"observability"` // 可观测性配置
-	CrossZoneMatch bool           `yaml:"cross_zone_match"` // Match 专用：true 时使用 Redis 跨服匹配队列
-	LogLevel       string         `yaml:"log_level"`        // 日志级别：debug/info/warn/error
-	Scale          Scale          `yaml:"scale"`            // 大规模分片与容量配置（见 docs/architecture-scale.md）
-	Gate           GateScale      `yaml:"gate"`             // Gate 转发层调优
-	InternalSecret string         `yaml:"internal_secret"`  // 内部接口鉴权密钥；空则不校验（开发）
-	Rank           RankConfig     `yaml:"rank"`             // 排行榜调优
+	InternalTLS       InternalTLS   `yaml:"internal_tls"`
+	Environment       string        `yaml:"environment"`         // development | test | production
+	Name              string        `yaml:"name"`                // 进程显示名，如 game、login
+	Type              string        `yaml:"type"`                // 服务类型，用于发现索引，如 game、gate
+	HTTPAddr          string        `yaml:"http_addr"`           // HTTP 监听地址，如 :9100
+	GRPCAddr          string        `yaml:"grpc_addr"`           // gRPC 监听地址（预留）
+	TCPAddr           string        `yaml:"tcp_addr"`            // TCP 监听地址，Gate 使用，如 :9000
+	AdvertiseHTTPAddr string        `yaml:"advertise_http_addr"` // 对外广播的 HTTP 地址；空则用 PublishAddr(http_addr)
+	AdvertiseTCPAddr  string        `yaml:"advertise_tcp_addr"`  // 对外广播的 TCP 地址（Login gate_addr）；空则推导
+	AdvertiseGRPCAddr string        `yaml:"advertise_grpc_addr"` // 对外广播的 gRPC 地址；空则推导
+	ZoneID            int32         `yaml:"zone_id"`             // 所属区服 ID，1=一区，2=二区
+	ZoneMode          string        `yaml:"zone_mode"`           // Gate 区服模式：dedicated=校验区服；hub=跨区路由
+	MaxConnPerIP      int           `yaml:"max_conn_per_ip"`     // Gate 单 IP 最大并发 TCP 连接数
+	Infra             Infra         `yaml:"infra"`               // 基础设施连接
+	Discovery         Discovery     `yaml:"discovery"`           // 服务发现配置
+	Observability     Observability `yaml:"observability"`       // 可观测性配置
+	CrossZoneMatch    bool          `yaml:"cross_zone_match"`    // Match 专用：true 时使用 Redis 跨服匹配队列
+	LogLevel          string        `yaml:"log_level"`           // 日志级别：debug/info/warn/error
+	Scale             Scale         `yaml:"scale"`               // 大规模分片与容量配置（见 docs/architecture-scale.md）
+	Gate              GateScale     `yaml:"gate"`                // Gate 转发层调优
+	InternalSecret    string        `yaml:"internal_secret"`     // 内部接口鉴权密钥；空则不校验（开发）
+	Rank              RankConfig    `yaml:"rank"`                // 排行榜调优
+	Payment           PaymentConfig `yaml:"payment"`             // 支付商品与回调签名
+}
+
+type InternalTLS struct {
+	Enabled    bool   `yaml:"enabled"`
+	CAFile     string `yaml:"ca_file"`
+	CertFile   string `yaml:"cert_file"`
+	KeyFile    string `yaml:"key_file"`
+	ServerName string `yaml:"server_name"`
+}
+
+// PaymentConfig keeps payment-provider verification separate from internal
+// service authentication. Product prices are authoritative server-side values.
+type PaymentConfig struct {
+	WebhookSecret string           `yaml:"webhook_secret"`
+	MaxSkewSec    int              `yaml:"max_skew_sec"`
+	Currency      string           `yaml:"currency"`
+	Products      map[string]int32 `yaml:"products"`
+}
+
+func (p PaymentConfig) MaxSkew() time.Duration {
+	if p.MaxSkewSec <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(p.MaxSkewSec) * time.Second
+}
+
+func (p PaymentConfig) CurrencyCode() string {
+	currency := strings.TrimSpace(p.Currency)
+	if currency == "" {
+		return "CNY"
+	}
+	return strings.ToUpper(currency)
+}
+
+// Production reports whether fail-closed production validation is enabled.
+func (s Service) Production() bool {
+	return strings.EqualFold(s.Environment, "production")
 }
 
 // RankConfig 排行榜容量与裁剪配置。
 type RankConfig struct {
-	Cap            int `yaml:"cap"`              // 每个榜保留 TopN，<=0 时默认 10000
+	Cap             int `yaml:"cap"`               // 每个榜保留 TopN，<=0 时默认 10000
 	TrimIntervalSec int `yaml:"trim_interval_sec"` // 后台裁剪间隔秒，<=0 时默认 60
 }
 
@@ -91,12 +133,12 @@ func (r RankConfig) TrimInterval() time.Duration {
 
 // Scale Game/Gate 分片与容量规划配置。
 type Scale struct {
-	ShardID         int32  `yaml:"shard_id"`           // 本 Game 进程分片编号，0..shard_count-1
-	ShardCount      int32  `yaml:"shard_count"`        // 单区 Game 分片总数，10 万 CCU 建议 50，100 万建议 500
-	MaxCCU          int32  `yaml:"max_ccu"`            // 本片最大在线告警阈值，默认 2000
-	SaveMode        string `yaml:"save_mode"`          // 落库模式：async | sync；默认 sync
-	SaveIntervalSec int    `yaml:"save_interval_sec"`  // async 模式 flush 间隔（秒），默认 10
-	SaveConcurrency int    `yaml:"save_concurrency"`   // async flush 并发数，默认 16
+	ShardID         int32  `yaml:"shard_id"`          // 本 Game 进程分片编号，0..shard_count-1
+	ShardCount      int32  `yaml:"shard_count"`       // 单区 Game 分片总数，10 万 CCU 建议 50，100 万建议 500
+	MaxCCU          int32  `yaml:"max_ccu"`           // 本片最大在线告警阈值，默认 2000
+	SaveMode        string `yaml:"save_mode"`         // 落库模式：async | sync；默认 sync
+	SaveIntervalSec int    `yaml:"save_interval_sec"` // async 模式 flush 间隔（秒），默认 10
+	SaveConcurrency int    `yaml:"save_concurrency"`  // async flush 并发数，默认 16
 }
 
 // SaveInterval 返回异步落库间隔。
@@ -179,11 +221,15 @@ func Load(path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(data, out); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(out); err != nil {
 		return fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if svc, ok := out.(*Service); ok {
-		applyEnvOverrides(svc)
+		if err := applyEnvOverrides(svc); err != nil {
+			return fmt.Errorf("invalid environment override: %w", err)
+		}
 		if err := svc.Validate(); err != nil {
 			return fmt.Errorf("invalid config %s: %w", path, err)
 		}
@@ -193,6 +239,14 @@ func Load(path string, out any) error {
 
 // Validate 校验配置自洽性，启动时 fail-fast，避免错误配置上线后才暴露。
 func (s *Service) Validate() error {
+	switch strings.ToLower(s.Environment) {
+	case "", "development", "test", "production":
+	default:
+		return fmt.Errorf("environment must be development|test|production, got %q", s.Environment)
+	}
+	if s.Name == "" || s.Type == "" {
+		return fmt.Errorf("name and type are required")
+	}
 	if s.Scale.ShardCount < 0 {
 		return fmt.Errorf("scale.shard_count must be >= 0, got %d", s.Scale.ShardCount)
 	}
@@ -220,7 +274,64 @@ func (s *Service) Validate() error {
 			return fmt.Errorf("%s must be host:port, got %q", pair.name, pair.addr)
 		}
 	}
+	if s.Production() {
+		if s.InternalSecret == "" {
+			return fmt.Errorf("internal_secret is required in production")
+		}
+		if s.Infra.Redis == "" && len(s.Infra.RedisCluster) == 0 {
+			return fmt.Errorf("redis is required in production")
+		}
+		switch s.Type {
+		case "login", "game", "mail", "social", "activity", "pay":
+			if s.Infra.Postgres == "" && len(s.Infra.PostgresShards) == 0 {
+				return fmt.Errorf("postgres is required for %s in production", s.Type)
+			}
+		}
+		if s.Type == "pay" && s.Payment.WebhookSecret == "" {
+			return fmt.Errorf("payment.webhook_secret is required in production")
+		}
+		if s.Type == "pay" && !validCurrencyCode(s.Payment.CurrencyCode()) {
+			return fmt.Errorf("payment.currency must be a 3-letter ISO code in production")
+		}
+		usesGRPC := (s.Type == "game" && s.GRPCAddr != "") ||
+			(s.Type == "gate" && s.Gate.GameTransport == "grpc")
+		if usesGRPC {
+			if !s.InternalTLS.Enabled {
+				return fmt.Errorf("internal_tls.enabled is required for production gRPC")
+			}
+			if s.InternalTLS.CAFile == "" || s.InternalTLS.CertFile == "" || s.InternalTLS.KeyFile == "" {
+				return fmt.Errorf("internal_tls ca_file, cert_file and key_file are required for production gRPC")
+			}
+			if s.Type == "gate" && s.InternalTLS.ServerName == "" {
+				return fmt.Errorf("internal_tls.server_name is required for production gRPC clients")
+			}
+		}
+		for _, addr := range []string{s.AdvertiseHTTPAddr, s.AdvertiseGRPCAddr} {
+			if addr == "" {
+				continue
+			}
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				return fmt.Errorf("invalid advertise address %q: %w", addr, err)
+			}
+			if host == "127.0.0.1" || host == "localhost" {
+				return fmt.Errorf("loopback advertise address is forbidden in production: %q", addr)
+			}
+		}
+	}
 	return nil
+}
+
+func validCurrencyCode(currency string) bool {
+	if len(currency) != 3 {
+		return false
+	}
+	for _, ch := range currency {
+		if ch < 'A' || ch > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 // applyEnvOverrides 用环境变量覆盖配置，便于容器/K8s 部署（StatefulSet 按 pod 注入分片号）。
@@ -233,14 +344,19 @@ func (s *Service) Validate() error {
 //   - NG_REDIS / NG_REDIS_CLUSTER（逗号分隔）/ NG_NATS
 //   - NG_POSTGRES / NG_POSTGRES_SHARDS（逗号分隔）
 //   - NG_INTERNAL_SECRET
-func applyEnvOverrides(svc *Service) {
+func applyEnvOverrides(svc *Service) error {
+	if v := os.Getenv("NG_ENVIRONMENT"); v != "" {
+		svc.Environment = v
+	}
 	if v := os.Getenv("NG_NAME"); v != "" {
 		svc.Name = v
 	}
 	if v := os.Getenv("NG_ZONE_ID"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			svc.ZoneID = int32(n)
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("NG_ZONE_ID=%q: %w", v, err)
 		}
+		svc.ZoneID = int32(n)
 	}
 	if v := os.Getenv("NG_HTTP_ADDR"); v != "" {
 		svc.HTTPAddr = v
@@ -261,11 +377,15 @@ func applyEnvOverrides(svc *Service) {
 		svc.AdvertiseGRPCAddr = v
 	}
 	if v := os.Getenv("NG_SHARD_COUNT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			svc.Scale.ShardCount = int32(n)
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("NG_SHARD_COUNT=%q: %w", v, err)
 		}
+		svc.Scale.ShardCount = int32(n)
 	}
-	if id, ok := shardIDFromEnv(); ok {
+	if id, ok, err := shardIDFromEnv(); err != nil {
+		return err
+	} else if ok {
 		svc.Scale.ShardID = id
 	}
 	if v := os.Getenv("NG_REDIS"); v != "" {
@@ -280,30 +400,77 @@ func applyEnvOverrides(svc *Service) {
 	if v := os.Getenv("NG_INTERNAL_SECRET"); v != "" {
 		svc.InternalSecret = v
 	}
+	if v := os.Getenv("NG_INTERNAL_TLS_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("NG_INTERNAL_TLS_ENABLED=%q: %w", v, err)
+		}
+		svc.InternalTLS.Enabled = enabled
+	}
+	if v := os.Getenv("NG_INTERNAL_TLS_CA_FILE"); v != "" {
+		svc.InternalTLS.CAFile = v
+	}
+	if v := os.Getenv("NG_INTERNAL_TLS_CERT_FILE"); v != "" {
+		svc.InternalTLS.CertFile = v
+	}
+	if v := os.Getenv("NG_INTERNAL_TLS_KEY_FILE"); v != "" {
+		svc.InternalTLS.KeyFile = v
+	}
+	if v := os.Getenv("NG_INTERNAL_TLS_SERVER_NAME"); v != "" {
+		svc.InternalTLS.ServerName = v
+	}
 	if v := os.Getenv("NG_POSTGRES"); v != "" {
 		svc.Infra.Postgres = v
 	}
 	if v := os.Getenv("NG_POSTGRES_SHARDS"); v != "" {
 		svc.Infra.PostgresShards = splitCSV(v)
 	}
+	if v := os.Getenv("NG_PAYMENT_WEBHOOK_SECRET"); v != "" {
+		svc.Payment.WebhookSecret = v
+	}
+	if v := os.Getenv("NG_PAYMENT_CURRENCY"); v != "" {
+		svc.Payment.Currency = strings.ToUpper(v)
+	}
+	if podIP := os.Getenv("POD_IP"); podIP != "" {
+		if net.ParseIP(podIP) == nil {
+			return fmt.Errorf("POD_IP=%q is not an IP address", podIP)
+		}
+		if svc.AdvertiseHTTPAddr == "" && svc.HTTPAddr != "" {
+			svc.AdvertiseHTTPAddr = replaceHost(svc.HTTPAddr, podIP)
+		}
+		if svc.AdvertiseGRPCAddr == "" && svc.GRPCAddr != "" {
+			svc.AdvertiseGRPCAddr = replaceHost(svc.GRPCAddr, podIP)
+		}
+	}
+	return nil
 }
 
 // shardIDFromEnv 解析分片号：优先 NG_SHARD_ID，其次 POD_NAME 末尾序号（StatefulSet）。
-func shardIDFromEnv() (int32, bool) {
+func shardIDFromEnv() (int32, bool, error) {
 	if v := os.Getenv("NG_SHARD_ID"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return int32(n), true
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, false, fmt.Errorf("NG_SHARD_ID=%q: %w", v, err)
 		}
+		return int32(n), true, nil
 	}
 	// StatefulSet pod 名形如 game-shard-3，取末尾数字。
 	if pod := os.Getenv("POD_NAME"); pod != "" {
 		if idx := strings.LastIndex(pod, "-"); idx >= 0 && idx+1 < len(pod) {
 			if n, err := strconv.Atoi(pod[idx+1:]); err == nil {
-				return int32(n), true
+				return int32(n), true, nil
 			}
 		}
 	}
-	return 0, false
+	return 0, false, nil
+}
+
+func replaceHost(addr, host string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func splitCSV(s string) []string {

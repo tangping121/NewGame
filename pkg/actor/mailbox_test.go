@@ -38,7 +38,7 @@ func TestMailboxClosedRejects(t *testing.T) {
 	m.Close()
 }
 
-func TestMailboxCallContextCancel(t *testing.T) {
+func TestMailboxAcceptedCallCompletesAfterContextDeadline(t *testing.T) {
 	m := actor.NewMailbox(1)
 	m.Post(func() { time.Sleep(200 * time.Millisecond) })
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -46,7 +46,7 @@ func TestMailboxCallContextCancel(t *testing.T) {
 	_, err := m.Call(ctx, func() ([]byte, error) {
 		return nil, nil
 	})
-	if err == nil {
-		t.Fatal("expected context error")
+	if err != nil {
+		t.Fatalf("accepted actor command must return its result, got %v", err)
 	}
 }

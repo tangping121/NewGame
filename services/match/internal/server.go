@@ -4,10 +4,14 @@ package internal
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"newgame/pkg/internalauth"
 	"newgame/pkg/log"
 	redisx "newgame/pkg/redis"
+	"newgame/pkg/session"
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -29,8 +34,10 @@ var battleHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // roomEntry 匹配生成的房间，带创建时间用于 TTL 清理。
 type roomEntry struct {
-	members []int64
-	created time.Time
+	Members []int64   `json:"members"`
+	RoomID  string    `json:"room_id,omitempty"`
+	State   string    `json:"state"`
+	Created time.Time `json:"created_at"`
 }
 
 // roomTTL 房间记录保留时长，超时由后台清理，防止内存无限增长。
@@ -55,9 +62,17 @@ func New(cfgPath string) (*Server, error) {
 	}
 	var resolver *discovery.Resolver
 	var rdb goredis.UniversalClient
-	if cfg.Infra.Redis != "" {
+	if cfg.Infra.Redis != "" || len(cfg.Infra.RedisCluster) > 0 {
 		rdb = redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
 		resolver = discovery.NewResolver(discovery.NewRegistry(rdb, cfg.Discovery.TTL()), 2*time.Second)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := redisx.Require(ctx, rdb, cfg.Production()); err != nil {
+		if rdb != nil {
+			_ = rdb.Close()
+		}
+		return nil, err
 	}
 	s := &Server{
 		cfg:       cfg,
@@ -71,39 +86,59 @@ func New(cfgPath string) (*Server, error) {
 	if cfg.CrossZoneMatch && rdb == nil {
 		return nil, fmt.Errorf("cross_zone_match requires redis")
 	}
-	go s.cleanupRooms()
 	return s, nil
 }
 
 // cleanupRooms 后台定期清理超过 roomTTL 的房间记录。
-func (s *Server) cleanupRooms() {
+func (s *Server) cleanupRooms(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		cutoff := time.Now().Add(-roomTTL)
-		s.roomsMu.Lock()
-		for id, rm := range s.rooms {
-			if rm.created.Before(cutoff) {
-				delete(s.rooms, id)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-roomTTL)
+			s.roomsMu.Lock()
+			for id, rm := range s.rooms {
+				if rm.Created.Before(cutoff) {
+					delete(s.rooms, id)
+				}
 			}
+			s.roomsMu.Unlock()
 		}
-		s.roomsMu.Unlock()
 	}
 }
 
 // putRoom 记录房间并打时间戳。
-func (s *Server) putRoom(matchID string, members []int64) {
+func (s *Server) putRoom(ctx context.Context, matchID string, members []int64, state, battleRoomID string) error {
+	entry := &roomEntry{Members: append([]int64(nil), members...), RoomID: battleRoomID, State: state, Created: time.Now()}
+	if s.redis != nil {
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		pipe := s.redis.Pipeline()
+		pipe.Set(ctx, "ng:match:room:"+matchID, raw, roomTTL)
+		for _, roleID := range members {
+			pipe.Set(ctx, fmt.Sprintf("ng:match:ticket:%d", roleID), matchID, roomTTL)
+		}
+		_, err = pipe.Exec(ctx)
+		return err
+	}
 	s.roomsMu.Lock()
-	s.rooms[matchID] = &roomEntry{members: members, created: time.Now()}
+	s.rooms[matchID] = entry
 	s.roomsMu.Unlock()
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	app.MountHealth(mux)
-	mux.HandleFunc("/api/match/join", s.handleJoin)
-	mux.HandleFunc("/api/match/room", s.handleRoom)
-	mux.HandleFunc("/api/match/queue", s.handleQueue)
+	auth := func(h http.HandlerFunc) http.HandlerFunc { return session.HTTPMiddleware(s.redis, h) }
+	mux.HandleFunc("/api/match/join", auth(s.handleJoin))
+	mux.HandleFunc("/api/match/room", auth(s.handleRoom))
+	mux.HandleFunc("/api/match/queue", auth(s.handleQueue))
 	return mux
 }
 
@@ -113,23 +148,24 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 1001, MatchId: err.Error()})
 		return
 	}
-	if req.RoleId == 0 {
-		_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 1001, MatchId: "role_id required"})
-		return
-	}
-	if req.ZoneId == 0 {
+	info, _ := session.FromContext(r.Context())
+	req.RoleId = info.RoleID
+	req.ZoneId = info.ZoneID
+	if req.ZoneId <= 0 {
 		req.ZoneId = s.cfg.ZoneID
 	}
 
 	if s.cfg.CrossZoneMatch {
-		s.handleCrossJoin(w, r, &req)
+		s.handleCrossJoin(w, r, &req, "global")
 		return
 	}
 	s.handleLocalJoin(w, r, &req)
 }
 
-func (s *Server) handleCrossJoin(w http.ResponseWriter, r *http.Request, req *pb.MatchRequest) {
-	matched, err := s.crossPool.Join(r.Context(), req.Mode, req.ZoneId, req.RoleId, playersPerMatch)
+func (s *Server) handleCrossJoin(
+	w http.ResponseWriter, r *http.Request, req *pb.MatchRequest, scope string,
+) {
+	matched, err := s.crossPool.Join(r.Context(), scope, req.Mode, req.ZoneId, req.RoleId, playersPerMatch)
 	if err != nil {
 		s.log.Warn("cross match join failed", zap.Error(err))
 		_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
@@ -141,14 +177,29 @@ func (s *Server) handleCrossJoin(w http.ResponseWriter, r *http.Request, req *pb
 		for i, e := range matched {
 			roleIDs[i] = e.RoleID
 		}
+		matchID, err := newMatchID("cx")
+		if err != nil {
+			_ = s.crossPool.Requeue(r.Context(), scope, req.Mode, matched)
+			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
+			return
+		}
+		if err := s.putRoom(r.Context(), matchID, roleIDs, "RESERVED", ""); err != nil {
+			_ = s.crossPool.Requeue(r.Context(), scope, req.Mode, matched)
+			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
+			return
+		}
 		roomID, err := s.createBattleRoom(r.Context(), roleIDs)
 		if err != nil {
+			s.deleteRoom(r.Context(), matchID, roleIDs)
+			_ = s.crossPool.Requeue(r.Context(), scope, req.Mode, matched)
 			s.log.Warn("battle room create failed", zap.Error(err))
 			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
 			return
 		}
-		matchID := fmt.Sprintf("cx_%d_%d", roleIDs[0], roleIDs[1])
-		s.putRoom(matchID, roleIDs)
+		if err := s.putRoom(r.Context(), matchID, roleIDs, "ROOM_CREATED", roomID); err != nil {
+			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
+			return
+		}
 		resp.MatchId = matchID
 		resp.RoomId = roomID
 		s.log.Info("cross-zone match",
@@ -161,6 +212,10 @@ func (s *Server) handleCrossJoin(w http.ResponseWriter, r *http.Request, req *pb
 }
 
 func (s *Server) handleLocalJoin(w http.ResponseWriter, r *http.Request, req *pb.MatchRequest) {
+	if s.crossPool != nil && s.redis != nil {
+		s.handleCrossJoin(w, r, req, fmt.Sprintf("zone:%d", req.ZoneId))
+		return
+	}
 	s.poolsMu.Lock()
 	pool := s.pools[req.Mode]
 	pool = appendUnique(pool, req.RoleId)
@@ -178,14 +233,22 @@ func (s *Server) handleLocalJoin(w http.ResponseWriter, r *http.Request, req *pb
 
 	// 创建战斗房间走网络调用，放到锁外，避免阻塞其他匹配请求。
 	if members != nil {
+		matchID, idErr := newMatchID("m")
+		if idErr != nil {
+			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: idErr.Error()})
+			return
+		}
+		_ = s.putRoom(r.Context(), matchID, members, "RESERVED", "")
 		roomID, err := s.createBattleRoom(r.Context(), members)
 		if err != nil {
 			s.log.Warn("battle room create failed", zap.Error(err))
 			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
 			return
 		}
-		matchID := fmt.Sprintf("m_%d_%d", members[0], members[1])
-		s.putRoom(matchID, members)
+		if err := s.putRoom(r.Context(), matchID, members, "ROOM_CREATED", roomID); err != nil {
+			_ = json.NewEncoder(w).Encode(pb.MatchResponse{Code: 5000, MatchId: err.Error()})
+			return
+		}
 		resp.MatchId = matchID
 		resp.RoomId = roomID
 	}
@@ -204,6 +267,9 @@ func appendUnique(pool []int64, id int64) []int64 {
 
 func (s *Server) createBattleRoom(ctx context.Context, members []int64) (string, error) {
 	base := s.battleURL(ctx)
+	if base == "" {
+		return "", fmt.Errorf("battle service unavailable")
+	}
 	body, _ := json.Marshal(map[string]any{"members": members})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/battle/room/create", bytes.NewReader(body))
 	if err != nil {
@@ -249,25 +315,107 @@ func (s *Server) battleURL(ctx context.Context) string {
 		}
 		s.log.Warn("battle discovery failed", zap.Int32("zone", s.cfg.ZoneID))
 	}
+	if s.cfg.Production() {
+		return ""
+	}
 	return "http://127.0.0.1:9300"
 }
 
 func (s *Server) handleRoom(w http.ResponseWriter, r *http.Request) {
 	matchID := r.URL.Query().Get("match_id")
-	s.roomsMu.Lock()
-	rm := s.rooms[matchID]
-	s.roomsMu.Unlock()
-	members := []int64{}
-	if rm != nil {
-		members = rm.members
+	roleID := session.RoleID(r.Context())
+	if strings.HasPrefix(matchID, "wait_") && s.redis != nil {
+		waitingRoleID, _ := strconv.ParseInt(strings.TrimPrefix(matchID, "wait_"), 10, 64)
+		if waitingRoleID != roleID {
+			http.Error(w, "match ticket does not belong to session", http.StatusForbidden)
+			return
+		}
+		if actual, err := s.redis.Get(r.Context(), fmt.Sprintf("ng:match:ticket:%d", roleID)).Result(); err == nil {
+			matchID = actual
+		}
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "members": members})
+	rm, err := s.getRoom(r.Context(), matchID)
+	if err != nil || rm == nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 1003, "message": "match not found"})
+		return
+	}
+	if !roomHasRole(rm, roleID) {
+		http.Error(w, "match does not belong to session", http.StatusForbidden)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code": 0, "match_id": matchID, "members": rm.Members,
+		"state":   valueOrEmpty(rm, func(v *roomEntry) string { return v.State }),
+		"room_id": valueOrEmpty(rm, func(v *roomEntry) string { return v.RoomID }),
+	})
+}
+
+func roomHasRole(room *roomEntry, roleID int64) bool {
+	for _, member := range room.Members {
+		if member == roleID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) getRoom(ctx context.Context, matchID string) (*roomEntry, error) {
+	if s.redis != nil {
+		raw, err := s.redis.Get(ctx, "ng:match:room:"+matchID).Bytes()
+		if err != nil {
+			return nil, err
+		}
+		var entry roomEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			return nil, err
+		}
+		return &entry, nil
+	}
+	s.roomsMu.Lock()
+	defer s.roomsMu.Unlock()
+	return s.rooms[matchID], nil
+}
+
+func (s *Server) deleteRoom(ctx context.Context, matchID string, members []int64) {
+	if s.redis != nil {
+		pipe := s.redis.Pipeline()
+		pipe.Del(ctx, "ng:match:room:"+matchID)
+		for _, roleID := range members {
+			pipe.Del(ctx, fmt.Sprintf("ng:match:ticket:%d", roleID))
+		}
+		_, _ = pipe.Exec(ctx)
+		return
+	}
+	s.roomsMu.Lock()
+	delete(s.rooms, matchID)
+	s.roomsMu.Unlock()
+}
+
+func newMatchID(prefix string) (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return prefix + "_" + hex.EncodeToString(raw[:]), nil
+}
+
+func valueOrEmpty[T any](value *roomEntry, selectValue func(*roomEntry) T) T {
+	if value == nil {
+		var zero T
+		return zero
+	}
+	return selectValue(value)
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	mode := int32(0)
-	if s.cfg.CrossZoneMatch && s.crossPool != nil {
-		n, err := s.crossPool.QueueSize(r.Context(), mode)
+	if s.crossPool != nil && s.redis != nil {
+		scope := "global"
+		if !s.cfg.CrossZoneMatch {
+			info, _ := session.FromContext(r.Context())
+			scope = fmt.Sprintf("zone:%d", info.ZoneID)
+		}
+		n, err := s.crossPool.QueueSize(r.Context(), scope, mode)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -286,7 +434,12 @@ func (s *Server) Run() error {
 		zap.String("addr", s.cfg.HTTPAddr),
 		zap.Bool("cross_zone", s.cfg.CrossZoneMatch),
 	)
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-	})
+	closers := make([]app.CloseFunc, 0, 1)
+	if s.redis != nil {
+		closers = append(closers, app.CloseNoContext(s.redis.Close))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		go s.cleanupRooms(ctx)
+		return app.RunHTTPContext(ctx, s.log, s.cfg.HTTPAddr, s.Handler())
+	}, closers...)
 }

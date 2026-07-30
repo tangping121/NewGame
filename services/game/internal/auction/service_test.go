@@ -13,7 +13,10 @@ func TestAuctionMemory(t *testing.T) {
 	s := auction.New(nil, mgr)
 	ctx := context.Background()
 
-	seller := mgr.Get(ctx, 10001)
+	seller, err := mgr.Get(ctx, 10001)
+	if err != nil {
+		t.Fatal(err)
+	}
 	seller.Inv.Add("potion", 5)
 	seller.Gold = 0
 
@@ -22,7 +25,10 @@ func TestAuctionMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	buyer := mgr.Get(ctx, 10002)
+	buyer, err := mgr.Get(ctx, 10002)
+	if err != nil {
+		t.Fatal(err)
+	}
 	buyer.Gold = 200
 	got, err := s.Buy(ctx, 10002, l.ID)
 	if err != nil {

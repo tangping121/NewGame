@@ -2,10 +2,13 @@ package internal
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"net"
 
 	"newgame/pkg/gamerpc"
 	"newgame/pkg/internalauth"
+	"newgame/pkg/internaltls"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -15,7 +18,10 @@ import (
 //
 // 与 HTTP /internal/player/msg 等价，复用同一 Actor 邮箱串行 + 异步落库路径。
 func (s *Server) Forward(ctx context.Context, req *gamerpc.ForwardRequest) (*gamerpc.ForwardResponse, error) {
-	resp, err := s.players.HandleMsg(ctx, req.RoleID, req.Cmd, req.Act, req.Body)
+	if req.Cmd > math.MaxUint16 || req.Act > math.MaxUint16 {
+		return nil, fmt.Errorf("protocol command out of range")
+	}
+	resp, err := s.players.HandleMsg(ctx, req.RoleId, uint16(req.Cmd), uint16(req.Act), req.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -23,22 +29,39 @@ func (s *Server) Forward(ctx context.Context, req *gamerpc.ForwardRequest) (*gam
 }
 
 // runGRPC 在 cfg.GRPCAddr 上启动 gRPC 转发服务（地址为空时跳过）。
-func (s *Server) runGRPC() {
+func (s *Server) runGRPC(ctx context.Context) error {
 	if s.cfg.GRPCAddr == "" {
-		return
+		<-ctx.Done()
+		return nil
 	}
 	ln, err := net.Listen("tcp", s.cfg.GRPCAddr)
 	if err != nil {
-		s.log.Error("game grpc listen failed", zap.String("addr", s.cfg.GRPCAddr), zap.Error(err))
-		return
+		return err
 	}
-	srv := grpc.NewServer(grpc.UnaryInterceptor(internalauth.UnaryServerInterceptor(s.cfg.InternalSecret)))
+	options := []grpc.ServerOption{
+		grpc.UnaryInterceptor(internalauth.UnaryServerInterceptor(s.cfg.InternalSecret)),
+	}
+	if s.cfg.InternalTLS.Enabled {
+		creds, err := internaltls.ServerCredentials(s.cfg.InternalTLS)
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		options = append(options, grpc.Creds(creds))
+	}
+	srv := grpc.NewServer(options...)
 	gamerpc.RegisterForwarderServer(srv, s)
 	s.grpcSrv = srv
 	s.log.Info("game grpc listening", zap.String("addr", s.cfg.GRPCAddr))
-	if err := srv.Serve(ln); err != nil && err != grpc.ErrServerStopped {
-		s.log.Error("game grpc serve failed", zap.Error(err))
+	go func() {
+		<-ctx.Done()
+		srv.GracefulStop()
+	}()
+	err = srv.Serve(ln)
+	if err == grpc.ErrServerStopped {
+		return nil
 	}
+	return err
 }
 
 // stopGRPC 优雅停止 gRPC 服务（关停时调用）。

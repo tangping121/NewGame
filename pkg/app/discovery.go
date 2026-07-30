@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"newgame/pkg/config"
@@ -10,6 +12,19 @@ import (
 
 	"go.uber.org/zap"
 )
+
+type CloseFunc func(context.Context) error
+
+func CloseNoContext(fn func() error) CloseFunc {
+	return func(context.Context) error { return fn() }
+}
+
+func CloseVoid(fn func()) CloseFunc {
+	return func(context.Context) error {
+		fn()
+		return nil
+	}
+}
 
 // StartDiscovery 若配置启用，则将本进程注册到 Redis 服务发现。
 //
@@ -60,4 +75,40 @@ func RunWithDiscovery(cfg config.Service, log *zap.Logger, fn func() error) erro
 		defer lc.Stop()
 	}
 	return fn()
+}
+
+// RunWithDiscoveryContext owns the process signal, discovery, tracing, and
+// reverse-order resource shutdown for a service.
+func RunWithDiscoveryContext(
+	cfg config.Service,
+	log *zap.Logger,
+	fn func(context.Context) error,
+	closers ...CloseFunc,
+) error {
+	root, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	shutdownTrace, err := InitTracing(cfg.Observability, cfg.Name, log)
+	if err != nil {
+		return err
+	}
+	lc, _, err := StartDiscovery(cfg, log)
+	if err != nil {
+		return err
+	}
+	if lc != nil {
+		defer lc.Stop()
+	}
+	if shutdownTrace != nil {
+		closers = append(closers, shutdownTrace)
+	}
+	err = fn(root)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for i := len(closers) - 1; i >= 0; i-- {
+		if closeErr := closers[i](shutdownCtx); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }

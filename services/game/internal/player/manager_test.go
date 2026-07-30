@@ -21,7 +21,11 @@ func TestGetConcurrentSingleActor(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			actors[idx] = m.Get(context.Background(), roleID)
+			var err error
+			actors[idx], err = m.Get(context.Background(), roleID)
+			if err != nil {
+				t.Errorf("Get: %v", err)
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -58,7 +62,11 @@ func TestWithPlayerSerializesMutations(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := m.Get(context.Background(), 42).Snapshot().Gold; got != operations {
+	a, err := m.Get(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Snapshot().Gold; got != operations {
 		t.Fatalf("gold = %d, want %d", got, operations)
 	}
 	m.Logout(context.Background(), 42)

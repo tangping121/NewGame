@@ -8,10 +8,10 @@ import (
 
 	"newgame/pkg/gamerpc"
 	"newgame/pkg/internalauth"
-	"newgame/pkg/rpccodec"
 	"newgame/pkg/scale"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -24,6 +24,7 @@ type GRPCPool struct {
 	conns   map[string]*grpc.ClientConn // grpc host:port -> 连接
 	timeout time.Duration
 	secret  string // 内部接口鉴权密钥
+	creds   credentials.TransportCredentials
 }
 
 // NewGRPCPool 创建 gRPC 转发池。
@@ -36,6 +37,10 @@ func NewGRPCPool() *GRPCPool {
 
 // SetSecret 设置内部接口鉴权密钥。
 func (p *GRPCPool) SetSecret(s string) { p.secret = s }
+
+func (p *GRPCPool) SetTransportCredentials(creds credentials.TransportCredentials) {
+	p.creds = creds
+}
 
 // Forward 通过 gRPC 调用 target（Game gRPC 地址）的 Forward 方法。
 func (p *GRPCPool) Forward(ctx context.Context, target string, roleID int64, zoneID int32, cmd, act uint16, body []byte) ([]byte, error) {
@@ -50,10 +55,10 @@ func (p *GRPCPool) Forward(ctx context.Context, target string, roleID int64, zon
 	defer cancel()
 	cctx = internalauth.WithOutgoing(cctx, p.secret)
 	resp, err := gamerpc.NewForwarderClient(cc).Forward(cctx, &gamerpc.ForwardRequest{
-		RoleID: roleID,
-		ZoneID: zoneID,
-		Cmd:    cmd,
-		Act:    act,
+		RoleId: roleID,
+		ZoneId: zoneID,
+		Cmd:    uint32(cmd),
+		Act:    uint32(act),
 		Body:   body,
 	})
 	if err != nil {
@@ -75,10 +80,11 @@ func (p *GRPCPool) conn(target string) (*grpc.ClientConn, error) {
 	if cc = p.conns[target]; cc != nil {
 		return cc, nil
 	}
-	cc, err := grpc.NewClient(target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(rpccodec.JSON{})),
-	)
+	creds := p.creds
+	if creds == nil {
+		creds = insecure.NewCredentials()
+	}
+	cc, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, err
 	}

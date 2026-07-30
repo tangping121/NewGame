@@ -4,14 +4,18 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+var processReady atomic.Bool
 
 // RunHTTP 启动 HTTP 服务并阻塞至收到 SIGINT/SIGTERM。
 //
@@ -22,6 +26,14 @@ import (
 //
 // 返回: Shutdown 超时或错误
 func RunHTTP(logger *zap.Logger, addr string, handler http.Handler) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return RunHTTPContext(ctx, logger, addr, handler)
+}
+
+// RunHTTPContext serves HTTP until ctx is cancelled. Listener failures are
+// returned immediately and readiness is true only while the listener is live.
+func RunHTTPContext(ctx context.Context, logger *zap.Logger, addr string, handler http.Handler) error {
 	handler = WrapObservability(handler, "http")
 	handler = http.MaxBytesHandler(handler, 1<<20) // cap request bodies at 1 MiB
 	srv := &http.Server{
@@ -33,26 +45,30 @@ func RunHTTP(logger *zap.Logger, addr string, handler http.Handler) error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	processReady.Store(true)
+	defer processReady.Store(false)
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("http listening", zap.String("addr", addr))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 			return
 		}
 		errCh <- nil
 	}()
 
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(ch)
 	select {
 	case err := <-errCh:
 		return err
-	case <-ch:
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	case <-ctx.Done():
+		processReady.Store(false)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
 		return <-errCh
@@ -61,6 +77,10 @@ func RunHTTP(logger *zap.Logger, addr string, handler http.Handler) error {
 
 // HealthHandler 标准健康检查，返回 200 与 body "ok"。
 func HealthHandler(w http.ResponseWriter, _ *http.Request) {
+	if !processReady.Load() {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
@@ -68,6 +88,11 @@ func HealthHandler(w http.ResponseWriter, _ *http.Request) {
 // MountHealth 向 mux 注册 /health、/metrics（JSON）、/metrics/prometheus。
 func MountHealth(mux *http.ServeMux) {
 	mux.HandleFunc("/health", HealthHandler)
+	mux.HandleFunc("/readyz", HealthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("/metrics", globalMetrics.Handler)
 	mux.Handle("/metrics/prometheus", PrometheusHandler())
 }

@@ -7,6 +7,7 @@ import "fmt"
 type Code int
 
 const (
+	CodeRateLimited  Code = 1004
 	CodeOK           Code = 0    // 成功
 	CodeInvalidParam Code = 1001 // 参数无效（缺字段、格式错）
 	CodeUnauthorized Code = 1002 // 未授权（密码错、token 无效）

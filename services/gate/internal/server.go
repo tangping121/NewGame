@@ -3,17 +3,17 @@ package internal
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"newgame/api/pb"
@@ -24,6 +24,7 @@ import (
 	"newgame/pkg/errors"
 	"newgame/pkg/gateforward"
 	"newgame/pkg/internalauth"
+	"newgame/pkg/internaltls"
 	"newgame/pkg/log"
 	"newgame/pkg/presence"
 	"newgame/pkg/protocol"
@@ -33,12 +34,14 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type connState struct {
-	roleID int64
-	zoneID int32
-	authed bool // 是否已完成 CmdLogin
+	roleID    int64
+	zoneID    int32
+	sessionID string
+	authed    bool // 是否已完成 CmdLogin
 }
 
 // clientConn 包装一条客户端 TCP 连接，串行化写操作。
@@ -47,6 +50,7 @@ type clientConn struct {
 	conn         net.Conn
 	mu           sync.Mutex
 	writeTimeout time.Duration
+	sessionID    string
 }
 
 // write 线程安全地写出一帧，带写超时防止慢客户端拖住 goroutine。
@@ -85,6 +89,12 @@ func New(cfgPath string) (*Server, error) {
 	}
 	logger := log.New(cfg.LogLevel)
 	rdb := redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := redisx.Require(ctx, rdb, cfg.Production()); err != nil {
+		_ = rdb.Close()
+		return nil, err
+	}
 	poolSize := cfg.Gate.GamePoolSize
 	transport := cfg.Gate.GameTransport
 	if transport == "" {
@@ -94,6 +104,13 @@ func New(cfgPath string) (*Server, error) {
 	if transport == "grpc" {
 		gp := gateforward.NewGRPCPool()
 		gp.SetSecret(cfg.InternalSecret)
+		if cfg.InternalTLS.Enabled {
+			creds, err := internaltls.ClientCredentials(cfg.InternalTLS)
+			if err != nil {
+				return nil, err
+			}
+			gp.SetTransportCredentials(creds)
+		}
 		fwd = gp
 	} else {
 		hp := gateforward.NewHTTPPool(poolSize)
@@ -107,7 +124,7 @@ func New(cfgPath string) (*Server, error) {
 		redis:     rdb,
 		disc:      reg,
 		resolver:  discovery.NewResolver(reg, 2*time.Second),
-		gameCli:   client.NewGameClientSharded(reg, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret),
+		gameCli:   client.NewGameClientSharded(reg, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 		limiter:   newConnLimiter(cfg.MaxConnPerIP),
 		forward:   fwd,
 		transport: transport,
@@ -120,54 +137,65 @@ func New(cfgPath string) (*Server, error) {
 }
 
 func (s *Server) Run() error {
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
+	closers := []app.CloseFunc{app.CloseNoContext(s.redis.Close)}
+	switch forward := s.forward.(type) {
+	case interface{ Close() }:
+		closers = append(closers, app.CloseVoid(forward.Close))
+	case interface{ CloseIdleConnections() }:
+		closers = append(closers, app.CloseVoid(forward.CloseIdleConnections))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
 		ln, err := net.Listen("tcp", s.cfg.TCPAddr)
 		if err != nil {
 			return err
 		}
 		s.log.Info("gate tcp listening", zap.String("addr", s.cfg.TCPAddr))
-
-		// 收到 SIGINT/SIGTERM 时关闭监听，停止 Accept，实现优雅停机。
-		go func() {
-			ch := make(chan os.Signal, 1)
-			signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-			<-ch
-			s.closing.Store(true)
-			_ = ln.Close()
-		}()
-
-		go func() {
+		group, groupCtx := errgroup.WithContext(ctx)
+		group.Go(func() error {
 			mux := http.NewServeMux()
 			app.MountHealth(mux)
 			mux.HandleFunc("/internal/push", internalauth.HTTPMiddleware(s.cfg.InternalSecret, s.handlePush))
-			_ = app.RunHTTP(s.log, s.cfg.HTTPAddr, mux)
-		}()
-
+			mux.HandleFunc("/internal/kick", internalauth.HTTPMiddleware(s.cfg.InternalSecret, s.handleKick))
+			return app.RunHTTPContext(groupCtx, s.log, s.cfg.HTTPAddr, mux)
+		})
 		var wg sync.WaitGroup
-		// 多 acceptor 协程并发 Accept，提升高建连速率下的接入吞吐。
-		n := s.cfg.Gate.AcceptorCount()
-		errCh := make(chan error, n)
-		var accWG sync.WaitGroup
-		for i := 0; i < n; i++ {
-			accWG.Add(1)
-			go func() {
-				defer accWG.Done()
-				errCh <- s.acceptLoop(ln, &wg)
-			}()
-		}
-		firstErr := <-errCh
-		if firstErr != nil {
-			// Unblock the remaining acceptors so the service can return the
-			// listener failure instead of hanging in accWG.Wait.
+		group.Go(func() error {
+			n := s.cfg.Gate.AcceptorCount()
+			errCh := make(chan error, n)
+			var accWG sync.WaitGroup
+			for i := 0; i < n; i++ {
+				accWG.Add(1)
+				go func() {
+					defer accWG.Done()
+					errCh <- s.acceptLoop(ln, &wg)
+				}()
+			}
+			firstErr := <-errCh
 			_ = ln.Close()
-		}
-		accWG.Wait()
-		wg.Wait() // 等待在处理的连接结束
-		if s.closing.Load() {
-			s.log.Info("gate stopped gracefully")
+			accWG.Wait()
+			wg.Wait()
+			if s.closing.Load() {
+				return nil
+			}
+			return firstErr
+		})
+		group.Go(func() error {
+			<-groupCtx.Done()
+			s.closing.Store(true)
+			_ = ln.Close()
+			s.closeConnections()
 			return nil
-		}
-		return firstErr
+		})
+		err = group.Wait()
+		s.log.Info("gate stopped gracefully")
+		return err
+	}, closers...)
+}
+
+func (s *Server) closeConnections() {
+	s.conns.Range(func(_, value any) bool {
+		_ = value.(*clientConn).conn.Close()
+		return true
 	})
 }
 
@@ -209,12 +237,16 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer func() {
 		if st.authed && st.roleID > 0 && s.conns.CompareAndDelete(st.roleID, cc) {
 			ctx, c := context.WithTimeout(context.Background(), 3*time.Second)
-			if err := presence.Remove(ctx, s.redis, st.roleID); err != nil {
+			removed := true
+			if err := presence.Remove(ctx, s.redis, st.roleID, st.sessionID); err != nil {
+				removed = false
 				redisx.RecordError("gate", "presence_remove")
 				s.log.Warn("presence remove failed", zap.Int64("role", st.roleID), zap.Error(err))
 			}
-			if err := s.gameCli.Logout(ctx, st.roleID); err != nil {
-				s.log.Warn("game logout failed", zap.Int64("role", st.roleID), zap.Error(err))
+			if removed {
+				if err := s.gameCli.Logout(ctx, st.roleID); err != nil {
+					s.log.Warn("game logout failed", zap.Int64("role", st.roleID), zap.Error(err))
+				}
 			}
 			c()
 		}
@@ -282,6 +314,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		wasAuthed := st.authed
 		resp := s.dispatch(connCtx, st, frame)
 		if !wasAuthed && st.authed && st.roleID > 0 {
+			cc.sessionID = st.sessionID
 			if previous, loaded := s.conns.Swap(st.roleID, cc); loaded && previous != cc {
 				_ = previous.(*clientConn).conn.Close()
 			}
@@ -328,24 +361,50 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
 }
 
+// handleKick closes only the fenced connection named by session_id. A delayed
+// kick from another Gate can therefore never disconnect a newer login.
+func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RoleID    int64  `json:"role_id"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RoleID <= 0 || req.SessionID == "" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if current, ok := s.conns.Load(req.RoleID); ok {
+		cc := current.(*clientConn)
+		if cc.sessionID == req.SessionID {
+			_ = cc.conn.Close()
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+}
+
 // dispatch 按 Cmd 路由 TCP 帧；未登录时除 CmdLogin/CmdPing 外返回 1002。
 func (s *Server) dispatch(ctx context.Context, st *connState, f protocol.Frame) protocol.Frame {
 	switch f.Cmd {
 	case protocol.CmdPing:
 		if st.authed && st.roleID > 0 {
-			if err := presence.Renew(ctx, s.redis, st.roleID, 24*time.Hour); err != nil {
+			if err := presence.Renew(ctx, s.redis, st.roleID, st.sessionID, 24*time.Hour); err != nil {
 				redisx.RecordError("gate", "presence_renew")
 				s.log.Debug("presence renew failed", zap.Int64("role", st.roleID), zap.Error(err))
+				if err == presence.ErrStaleSession {
+					st.authed = false
+					return errFrame(f, errors.CodeUnauthorized, "session replaced")
+				}
 			}
 		}
 		return protocol.Frame{Cmd: f.Cmd, Act: f.Act, Body: []byte(`{"pong":true}`)}
 	case protocol.CmdLogin:
 		return s.handleLogin(ctx, st, f)
-	default:
+	case protocol.CmdGame:
 		if !st.authed {
 			return errFrame(f, errors.CodeUnauthorized, "not logged in")
 		}
 		return s.forwardGame(ctx, st, f)
+	default:
+		return errFrame(f, errors.CodeInvalidParam, "unsupported command")
 	}
 }
 
@@ -368,32 +427,71 @@ func (s *Server) handleLogin(ctx context.Context, st *connState, f protocol.Fram
 	if s.cfg.ZoneMode != "hub" && s.cfg.ZoneID > 0 && info.ZoneID > 0 && info.ZoneID != s.cfg.ZoneID {
 		return errFrame(f, errors.CodeUnauthorized, "zone mismatch")
 	}
-	st.authed = true
-	st.roleID = info.RoleID
-	st.zoneID = info.ZoneID
-	if st.zoneID == 0 {
-		st.zoneID = s.cfg.ZoneID
+	sessionID, err := newConnectionSessionID()
+	if err != nil {
+		return errFrame(f, errors.CodeInternal, "failed to create session")
+	}
+	zoneID := info.ZoneID
+	if zoneID == 0 {
+		zoneID = s.cfg.ZoneID
 	}
 	shardCount := s.cfg.Scale.ShardCount
 	if shardCount <= 0 {
 		shardCount = 1
 	}
-	shardID := shard.ForRole(st.roleID, shardCount)
-	if err := presence.Store(ctx, s.redis, presence.Record{
-		RoleID:   st.roleID,
-		ZoneID:   st.zoneID,
-		ShardID:  shardID,
-		GateID:   s.gateInst,
-		GateAddr: discovery.AdvertiseAddr(s.cfg.TCPAddr, s.cfg.AdvertiseTCPAddr),
-		GateHTTP: s.gateHTTP,
-	}, 24*time.Hour); err != nil {
+	shardID := shard.ForRole(info.RoleID, shardCount)
+	previous, err := presence.Store(ctx, s.redis, presence.Record{
+		RoleID:    info.RoleID,
+		ZoneID:    zoneID,
+		ShardID:   shardID,
+		GateID:    s.gateInst,
+		GateAddr:  discovery.AdvertiseAddr(s.cfg.TCPAddr, s.cfg.AdvertiseTCPAddr),
+		GateHTTP:  s.gateHTTP,
+		SessionID: sessionID,
+	}, 24*time.Hour)
+	if err != nil {
 		redisx.RecordError("gate", "presence_store")
-		s.log.Warn("presence store failed", zap.Int64("role", st.roleID), zap.Error(err))
+		s.log.Warn("presence store failed", zap.Int64("role", info.RoleID), zap.Error(err))
+		return errFrame(f, errors.CodeInternal, "presence unavailable")
+	}
+	st.authed = true
+	st.roleID = info.RoleID
+	st.zoneID = zoneID
+	st.sessionID = sessionID
+	if previous.SessionID != "" && previous.SessionID != sessionID && previous.GateHTTP != "" && previous.GateID != s.gateInst {
+		go s.kickPrevious(previous)
 	}
 	return protocol.Frame{
 		Cmd:  f.Cmd,
 		Act:  f.Act,
 		Body: []byte(`{"code":0,"message":"gate login ok","zone_id":` + strconv.FormatInt(int64(st.zoneID), 10) + `}`),
+	}
+}
+
+func newConnectionSessionID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func (s *Server) kickPrevious(previous presence.Record) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]any{
+		"role_id": previous.RoleID, "session_id": previous.SessionID,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+previous.GateHTTP+"/internal/kick", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	internalauth.SetHTTP(req, s.cfg.InternalSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
 	}
 }
 
@@ -439,6 +537,9 @@ func (s *Server) gameTarget(ctx context.Context, roleID int64, zoneID int32) str
 			return inst.HTTPBase()
 		}
 		s.log.Warn("game discovery failed", zap.String("name", name), zap.Int32("zone", zoneID))
+	}
+	if s.cfg.Production() {
+		return ""
 	}
 	return s.fallbackTarget(zoneID)
 }

@@ -32,6 +32,13 @@ func NewRegistry(rdb goredis.UniversalClient, ttl time.Duration) *Registry {
 	return &Registry{rdb: rdb, ttl: ttl}
 }
 
+// Close releases the Redis client owned by this registry.
+func (r *Registry) Close() {
+	if r != nil && r.rdb != nil {
+		_ = r.rdb.Close()
+	}
+}
+
 // indexKey 某服务在某区服的实例 ID 集合。
 func (r *Registry) indexKey(name string, zoneID int32) string {
 	return fmt.Sprintf("%sidx:%s:%d", keyPrefix, name, zoneID)
@@ -275,4 +282,5 @@ func (lc *Lifecycle) Stop() {
 	} else if lc.log != nil {
 		lc.log.Info("discovery deregistered", zap.String("id", lc.inst.ID))
 	}
+	_ = lc.reg.rdb.Close()
 }

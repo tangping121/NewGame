@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: game-config
+  namespace: newgame
+data:
+  game.yaml: |
+    environment: production
+    name: game
+    type: game
+    http_addr: ":9100"
+    grpc_addr: ":9150"
+    zone_id: 1
+    log_level: info
+    scale:
+      shard_count: 50
+      save_mode: sync
+    discovery:
+      enabled: true
+      ttl_sec: 15
+      heartbeat_sec: 5
+    internal_tls:
+      enabled: true
+      ca_file: /etc/newgame/tls/ca.crt
+      cert_file: /etc/newgame/tls/tls.crt
+      key_file: /etc/newgame/tls/tls.key
+    observability:
+      prometheus: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gate-config
+  namespace: newgame
+data:
+  gate.yaml: |
+    environment: production
+    name: gate
+    type: gate
+    http_addr: ":9001"
+    tcp_addr: ":9000"
+    zone_id: 1
+    zone_mode: dedicated
+    max_conn_per_ip: 32
+    log_level: info
+    scale:
+      shard_count: 50
+    gate:
+      game_transport: grpc
+      forward_timeout_ms: 3000
+      msg_rate_per_sec: 100
+    discovery:
+      enabled: true
+      ttl_sec: 15
+      heartbeat_sec: 5
+    internal_tls:
+      enabled: true
+      ca_file: /etc/newgame/tls/ca.crt
+      cert_file: /etc/newgame/tls/tls.crt
+      key_file: /etc/newgame/tls/tls.key
+      server_name: game-shard.newgame.svc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: login-config
+  namespace: newgame
+data:
+  login.yaml: |
+    environment: production
+    name: login
+    type: login
+    http_addr: ":8080"
+    zone_id: 1
+    log_level: info
+    scale:
+      shard_count: 50
+    discovery:
+      enabled: true
+      ttl_sec: 15
+      heartbeat_sec: 5
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: newgame-public-addresses
+  namespace: newgame
+data:
+  gate_tcp: "REPLACE_WITH_PUBLIC_GATE_HOST:9000"

@@ -8,8 +8,8 @@
 
 | 规模 | Gate 节点 | Game 分片 | 关键改造 |
 |------|-----------|-----------|----------|
-| 10 万 | ~7–10 | ~50 | 分片路由 + 连接池 + presence + **异步落库** |
-| 100 万 | ~67–100 | ~500 | gRPC 流 + Redis/PG 集群 + K8s HPA |
+| 10 万 | ~7–10 | ~50 | 固定分片路由 + presence + 关键写同步持久化 |
+| 100 万 | ~67–100 | ~500 | protobuf gRPC + Redis/PG/JetStream 集群 + 受控重分片 |
 
 预埋包：`pkg/shard`（分片路由）、`pkg/presence`（在线表）、`pkg/scale`（容量常量）。
 
@@ -67,6 +67,7 @@ D:\NewGame
 ```powershell
 cd D:\NewGame
 docker compose up -d
+# migrate 容器会在 PostgreSQL 健康后执行全部版本迁移
 ```
 
 | 服务 | 端口 |
@@ -134,7 +135,10 @@ go run ./tools/robot
 
 ## 安全配置
 
-- 生产环境必须通过 `NG_INTERNAL_SECRET`（或配置文件的 `internal_secret`）设置非空内部密钥；GM、支付回调/重试/对账、发邮件、Battle 建房及 Game `/internal/*` 会校验 `X-Internal-Token`。
+- 生产环境必须通过 `NG_INTERNAL_SECRET`（或配置文件的 `internal_secret`）设置非空内部密钥；GM、支付重试/对账、发邮件、Battle 建房及 Game `/internal/*` 会校验 `X-Internal-Token`。
+- 客户 HTTP 接口必须携带 `Authorization: Bearer <login token>` 或 `X-Session-Token`，服务端身份不再信任请求体中的 `role_id`。
+- 支付回调使用独立 HMAC 密钥、时间戳、nonce 和平台交易号校验，不能复用内部服务密钥。
+- 生产 Gate→Game gRPC 必须配置 TLS 1.3 双向认证；Kubernetes 示例同时启用内部令牌、mTLS 和 NetworkPolicy。
 - Login、Game、Pay、Mail 配置了 PostgreSQL 时会在数据库连接失败后直接拒绝启动，避免静默降级到内存模式或绕过鉴权/幂等。
 - HTTP 请求体统一限制为 1 MiB，并启用读、写、空闲及请求头超时。
 
@@ -196,7 +200,7 @@ go test -tags=integration ./tests/integration/...
 - Battle `:9300` — `/api/battle/room/create|settle`
 - 其余路由常量见 `pkg/protocol/http_api.go`
 
-### NATS 异步
+### NATS JetStream 可靠事件
 
 | 主题 | 载荷 |
 |------|------|
@@ -208,7 +212,7 @@ go test -tags=integration ./tests/integration/...
 
 - 每个服务独立 `cmd/main.go`，通过 `-config configs/xxx.yaml` 加载配置
 - Game 服务采用一玩家一 Actor 模型（`pkg/actor`）
-- 跨服务异步消息通过 NATS（mail.send / rank.update / activity.event）
+- 跨服务事件通过事务 Outbox、NATS JetStream、持久化 ACK、Inbox 去重和 DLQ 投递
 - 服务注册与发现通过 Redis 自研实现（`pkg/discovery`），TTL + 心跳续约
 - 所有服务暴露 `GET /health` 健康检查
 

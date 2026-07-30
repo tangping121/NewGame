@@ -36,8 +36,15 @@ func New(cfgPath string) (*Server, error) {
 	}
 	var disc *discovery.Registry
 	var resolver *discovery.Resolver
-	if cfg.Infra.Redis != "" {
-		disc = discovery.NewRegistry(redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster), cfg.Discovery.TTL())
+	if cfg.Infra.Redis != "" || len(cfg.Infra.RedisCluster) > 0 {
+		rdb := redisx.New(cfg.Infra.Redis, cfg.Infra.RedisCluster)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := redisx.Require(ctx, rdb, cfg.Production()); err != nil {
+			_ = rdb.Close()
+			return nil, err
+		}
+		disc = discovery.NewRegistry(rdb, cfg.Discovery.TTL())
 		resolver = discovery.NewResolver(disc, 2*time.Second)
 	}
 	return &Server{cfg: cfg, log: log.New(cfg.LogLevel), disc: disc, resolver: resolver}, nil
@@ -188,6 +195,9 @@ func (s *Server) serviceURL(ctx context.Context, name string, zoneID int32) stri
 			return inst.HTTPBase()
 		}
 		s.log.Warn("service discovery failed", zap.String("name", name), zap.Int32("zone", zoneID))
+		if s.cfg.Production() {
+			return ""
+		}
 	}
 	return fallbackURL(name, zoneID)
 }
@@ -212,7 +222,11 @@ func fallbackURL(name string, zoneID int32) string {
 
 func (s *Server) Run() error {
 	s.log.Info("gm service ready", zap.String("addr", s.cfg.HTTPAddr))
-	return app.RunWithDiscovery(s.cfg, s.log, func() error {
-		return app.RunHTTP(s.log, s.cfg.HTTPAddr, s.Handler())
-	})
+	closers := make([]app.CloseFunc, 0, 1)
+	if s.disc != nil {
+		closers = append(closers, app.CloseVoid(s.disc.Close))
+	}
+	return app.RunWithDiscoveryContext(s.cfg, s.log, func(ctx context.Context) error {
+		return app.RunHTTPContext(ctx, s.log, s.cfg.HTTPAddr, s.Handler())
+	}, closers...)
 }

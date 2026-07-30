@@ -22,6 +22,10 @@ func key(token string) string {
 	return keyPrefix + token
 }
 
+func validToken(token string) bool {
+	return len(token) >= 16 && len(token) <= 128
+}
+
 // Save 将登录会话持久化到 Redis。
 //
 // 参数:
@@ -33,6 +37,9 @@ func key(token string) string {
 //
 // 返回: Redis 写入或 JSON 序列化失败时的错误
 func Save(ctx context.Context, rdb goredis.UniversalClient, token string, info Info, ttl time.Duration) error {
+	if rdb == nil || !validToken(token) || info.RoleID <= 0 {
+		return fmt.Errorf("invalid session")
+	}
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
@@ -54,6 +61,9 @@ func Save(ctx context.Context, rdb goredis.UniversalClient, token string, info I
 //   - Info: 会话中的角色与区服信息
 //   - error: token 不存在、已过期或 role_id 无效时返回错误
 func Load(ctx context.Context, rdb goredis.UniversalClient, token string) (Info, error) {
+	if rdb == nil || !validToken(token) {
+		return Info{}, fmt.Errorf("invalid session")
+	}
 	raw, err := rdb.Get(ctx, key(token)).Result()
 	if err == goredis.Nil {
 		return Info{}, fmt.Errorf("session not found")

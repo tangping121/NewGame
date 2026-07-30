@@ -9,13 +9,28 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 CREATE TABLE IF NOT EXISTS roles (
     id          BIGINT PRIMARY KEY,
-    account_id  BIGINT NOT NULL REFERENCES accounts(id),
+    account_id  BIGINT NOT NULL,
     zone_id     INT NOT NULL,
     name        VARCHAR(32) NOT NULL,
     level       INT NOT NULL DEFAULT 1,
     snapshot    JSONB NOT NULL DEFAULT '{}',
+    version     BIGINT NOT NULL DEFAULT 1,
+    owner_epoch BIGINT NOT NULL DEFAULT 1,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (zone_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS role_directory (
+    id          BIGINT PRIMARY KEY,
+    account_id  BIGINT NOT NULL REFERENCES accounts(id),
+    zone_id     INT NOT NULL,
+    name        VARCHAR(32) NOT NULL,
+    level       INT NOT NULL DEFAULT 1,
+    shard_id    INT NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (account_id, zone_id),
     UNIQUE (zone_id, name)
 );
 
@@ -24,13 +39,29 @@ CREATE TABLE IF NOT EXISTS orders (
     role_id     BIGINT NOT NULL,
     product_id  VARCHAR(64) NOT NULL,
     amount      INT NOT NULL,
+    currency    VARCHAR(3) NOT NULL DEFAULT 'CNY',
     status      SMALLINT NOT NULL DEFAULT 0,
     delivered   BOOLEAN NOT NULL DEFAULT FALSE,
+    provider_transaction_id VARCHAR(128),
+    paid_at     TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_roles_account ON roles(account_id);
 CREATE INDEX IF NOT EXISTS idx_orders_role ON orders(role_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_provider_transaction
+    ON orders(provider_transaction_id) WHERE provider_transaction_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS economy_ledger (
+    id          BIGSERIAL PRIMARY KEY,
+    role_id     BIGINT NOT NULL,
+    source      VARCHAR(160) NOT NULL,
+    kind        VARCHAR(32) NOT NULL,
+    payload     JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (role_id, source)
+);
 
 CREATE TABLE IF NOT EXISTS mails (
     id          BIGSERIAL PRIMARY KEY,

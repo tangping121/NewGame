@@ -7,13 +7,12 @@ import (
 	"time"
 
 	"newgame/pkg/gamerpc"
-	"newgame/pkg/rpccodec"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// echoServer 回显请求，验证 gRPC + JSON codec 往返。
+// echoServer 回显请求，验证生成的 protobuf gRPC 往返。
 type echoServer struct{}
 
 func (echoServer) Forward(_ context.Context, req *gamerpc.ForwardRequest) (*gamerpc.ForwardResponse, error) {
@@ -32,7 +31,6 @@ func TestForwarderRoundTrip(t *testing.T) {
 
 	cc, err := grpc.NewClient(ln.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(rpccodec.JSON{})),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +40,7 @@ func TestForwarderRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	resp, err := gamerpc.NewForwarderClient(cc).Forward(ctx, &gamerpc.ForwardRequest{
-		RoleID: 10001, ZoneID: 1, Cmd: 2, Act: 2, Body: []byte(`{"hello":"world"}`),
+		RoleId: 10001, ZoneId: 1, Cmd: 2, Act: 2, Body: []byte(`{"hello":"world"}`),
 	})
 	if err != nil {
 		t.Fatalf("forward: %v", err)

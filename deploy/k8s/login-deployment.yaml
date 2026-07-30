@@ -6,6 +6,8 @@ metadata:
   namespace: newgame
 spec:
   replicas: 3
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
     matchLabels:
       app: login
@@ -14,13 +16,34 @@ spec:
       labels:
         app: login
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: login
-          image: newgame/login:latest
+          image: newgame/login:0.2.0
           args: ["-config", "/etc/newgame/login.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - { name: http, containerPort: 8080 }
           env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NG_ENVIRONMENT
+              value: "production"
+            - name: NG_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: internal-secret
             - name: NG_HTTP_ADDR
               value: ":8080"
             - name: NG_ZONE_ID
@@ -28,14 +51,36 @@ spec:
             - name: NG_REDIS_CLUSTER
               value: "redis-0.redis:6379,redis-1.redis:6379,redis-2.redis:6379"
             - name: NG_POSTGRES
-              value: "postgres://u:p@pg0:5432/newgame?sslmode=disable"
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: postgres-central
+            - name: NG_POSTGRES_SHARDS
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: postgres-shards
+            - name: NG_SHARD_COUNT
+              value: "50"
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/newgame
+              readOnly: true
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 3
             periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
           resources:
             requests: { cpu: "250m", memory: "128Mi" }
             limits:   { cpu: "1",    memory: "512Mi" }
+      volumes:
+        - name: cfg
+          configMap:
+            name: login-config
 ---
 apiVersion: v1
 kind: Service

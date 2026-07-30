@@ -4,21 +4,90 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-
+          cache: true
       - name: Download dependencies
         run: go mod download
-
-      - name: Test
-        run: go test ./...
-
-      - name: Build
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Race tests
+        run: go test -race ./...
+      - name: Build all binaries
         run: go build ./...
+      - name: Validate Compose
+        run: docker compose config --quiet
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Start dependencies, migrate, and run smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose up -d redis postgres nats
+          docker compose run --rm migrate
+
+          go run ./services/game/cmd -config configs/game.yaml >/tmp/game.log 2>&1 &
+          game_pid=$!
+          go run ./services/gate/cmd -config configs/gate.yaml >/tmp/gate.log 2>&1 &
+          gate_pid=$!
+          go run ./services/login/cmd -config configs/login.yaml >/tmp/login.log 2>&1 &
+          login_pid=$!
+          go run ./services/rank/cmd -config configs/rank.yaml >/tmp/rank.log 2>&1 &
+          rank_pid=$!
+
+          cleanup() {
+            kill "$game_pid" "$gate_pid" "$login_pid" "$rank_pid" 2>/dev/null || true
+            docker compose down -v
+          }
+          trap cleanup EXIT
+
+          for url in \
+            http://127.0.0.1:9100/readyz \
+            http://127.0.0.1:9001/readyz \
+            http://127.0.0.1:8080/readyz \
+            http://127.0.0.1:9600/readyz; do
+            ready=false
+            for _ in $(seq 1 90); do
+              if curl --fail --silent "$url" >/dev/null; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" != true ]; then
+              cat /tmp/game.log /tmp/gate.log /tmp/login.log /tmp/rank.log
+              exit 1
+            fi
+          done
+          go test -tags=integration ./tests/integration/...
+
+  container:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [login, gate, game]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build service image
+        run: docker build --build-arg SERVICE=${{ matrix.service }} -t newgame/${{ matrix.service }}:ci .
+      - name: Build migration image
+        if: matrix.service == 'login'
+        run: docker build -f Dockerfile.migrate -t newgame/migrate:ci .

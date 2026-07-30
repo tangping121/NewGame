@@ -20,12 +20,13 @@ import (
 // 分片模式（shardCount>0）：按 role_id 路由到 game-shard-{role_id%N}，
 // 与 Gate 的路由保持一致，保证同一玩家的请求总落到同一 Game 分片。
 type GameClient struct {
-	disc       *discovery.Registry  // 服务发现；nil 时使用硬编码回退地址
-	resolver   *discovery.Resolver  // 带 TTL 缓存的实例解析，避免每次健康探测
-	zoneID     int32                // 目标区服
-	shardCount int32                // Game 分片总数；<=0 表示单进程（注册名 "game"）
-	secret     string               // 内部接口鉴权密钥
-	http       *http.Client         // HTTP 客户端，超时 5 秒
+	disc       *discovery.Registry // 服务发现；nil 时使用硬编码回退地址
+	resolver   *discovery.Resolver // 带 TTL 缓存的实例解析，避免每次健康探测
+	zoneID     int32               // 目标区服
+	shardCount int32               // Game 分片总数；<=0 表示单进程（注册名 "game"）
+	secret     string              // 内部接口鉴权密钥
+	strict     bool                // production: discovery failure is fatal
+	http       *http.Client        // HTTP 客户端，超时 5 秒
 }
 
 // NewGameClient 创建 Game 内部 API 客户端（单进程模式）。
@@ -63,6 +64,11 @@ func (c *GameClient) WithSecret(secret string) *GameClient {
 	return c
 }
 
+func (c *GameClient) WithStrict(strict bool) *GameClient {
+	c.strict = strict
+	return c
+}
+
 // baseURLForRole 按 role_id 解析目标 Game 实例 HTTP 基址。
 //
 // 分片模式：发现 game-shard-{role_id%N}；单进程：发现 "game"。
@@ -75,6 +81,9 @@ func (c *GameClient) baseURLForRole(ctx context.Context, roleID int64) string {
 		}
 		if inst, ok := c.resolver.Resolve(ctx, name, c.zoneID); ok {
 			return inst.HTTPBase()
+		}
+		if c.strict {
+			return ""
 		}
 	}
 	switch c.zoneID {
@@ -96,6 +105,9 @@ func (c *GameClient) baseURLForRole(ctx context.Context, roleID int64) string {
 // 返回: HTTP 失败或响应 code!=0 时返回 error
 func (c *GameClient) Grant(ctx context.Context, roleID int64, bundle grant.Bundle, source string) error {
 	base := c.baseURLForRole(ctx, roleID)
+	if base == "" {
+		return fmt.Errorf("game shard unavailable for role %d", roleID)
+	}
 	body, _ := json.Marshal(map[string]any{
 		"role_id": roleID,
 		"gold":    bundle.Gold,
@@ -119,7 +131,9 @@ func (c *GameClient) Grant(ctx context.Context, roleID int64, bundle grant.Bundl
 	var out struct {
 		Code int `json:"code"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("decode game grant response: %w", err)
+	}
 	if out.Code != 0 {
 		return fmt.Errorf("game grant code %d", out.Code)
 	}
@@ -131,6 +145,9 @@ func (c *GameClient) Grant(ctx context.Context, roleID int64, bundle grant.Bundl
 // 失败不影响主流程（Game 侧有空闲淘汰兜底），仅尽力而为。
 func (c *GameClient) Logout(ctx context.Context, roleID int64) error {
 	base := c.baseURLForRole(ctx, roleID)
+	if base == "" {
+		return fmt.Errorf("game shard unavailable for role %d", roleID)
+	}
 	body, _ := json.Marshal(map[string]any{"role_id": roleID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/internal/player/logout", bytes.NewReader(body))
 	if err != nil {

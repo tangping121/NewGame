@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"newgame/pkg/auth"
+	"newgame/pkg/shard"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -86,6 +87,7 @@ type Role struct {
 	ZoneID    int32  // 区服 ID
 	Name      string // 角色名（通常与用户名相同）
 	Level     int32  // 等级（表字段，详细数据在 snapshot）
+	ShardID   int32  // owning logical/database shard
 }
 
 // GetOrCreateRole 获取账号在指定区服的角色，不存在则创建。
@@ -99,13 +101,13 @@ type Role struct {
 // 返回:
 //   - Role: 角色信息；新角色 ID 规则为 accountID*10000 + zoneID
 //   - error: 数据库错误
-func (r *AccountRepo) GetOrCreateRole(ctx context.Context, accountID int64, zoneID int32, username string) (Role, error) {
+func (r *AccountRepo) GetOrCreateRole(ctx context.Context, accountID int64, zoneID int32, username string, shardCount int32) (Role, error) {
 	var role Role
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, account_id, zone_id, name, level FROM roles
+		`SELECT id, account_id, zone_id, name, level, shard_id FROM role_directory
 		 WHERE account_id = $1 AND zone_id = $2`,
 		accountID, zoneID,
-	).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level)
+	).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level, &role.ShardID)
 	if err == nil {
 		return role, nil
 	}
@@ -113,25 +115,29 @@ func (r *AccountRepo) GetOrCreateRole(ctx context.Context, accountID int64, zone
 		return Role{}, err
 	}
 	roleID := accountID*10000 + int64(zoneID)
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+	role.ShardID = shard.ForRole(roleID, shardCount)
 	name := username
 	if len(name) > 32 {
 		name = name[:32]
 	}
 	err = r.pool.QueryRow(ctx,
-		`INSERT INTO roles (id, account_id, zone_id, name, level)
-		 VALUES ($1, $2, $3, $4, 1)
+		`INSERT INTO role_directory (id, account_id, zone_id, name, level, shard_id)
+		 VALUES ($1, $2, $3, $4, 1, $5)
 		 ON CONFLICT DO NOTHING
-		 RETURNING id, account_id, zone_id, name, level`,
-		roleID, accountID, zoneID, name,
-	).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level)
+		 RETURNING id, account_id, zone_id, name, level, shard_id`,
+		roleID, accountID, zoneID, name, role.ShardID,
+	).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level, &role.ShardID)
 	if err == pgx.ErrNoRows {
 		// A concurrent request for this account may have created the role.
 		// Never transfer a name-conflicting role from another account.
 		err = r.pool.QueryRow(ctx,
-			`SELECT id, account_id, zone_id, name, level FROM roles
+			`SELECT id, account_id, zone_id, name, level, shard_id FROM role_directory
 			 WHERE account_id = $1 AND zone_id = $2`,
 			accountID, zoneID,
-		).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level)
+		).Scan(&role.ID, &role.AccountID, &role.ZoneID, &role.Name, &role.Level, &role.ShardID)
 		if err == pgx.ErrNoRows {
 			return Role{}, fmt.Errorf("role name %q is already in use in zone %d", name, zoneID)
 		}

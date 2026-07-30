@@ -11,3 +11,11 @@ discovery:
   enabled: true
   ttl_sec: 15
   heartbeat_sec: 5
+payment:
+  webhook_secret: "dev-pay-webhook-secret"
+  max_skew_sec: 300
+  currency: "CNY"
+  products:
+    coin_pack: 100
+    starter: 600
+    diamond: 300

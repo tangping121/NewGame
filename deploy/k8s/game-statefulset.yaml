@@ -7,7 +7,7 @@ metadata:
   namespace: newgame
 spec:
   serviceName: game-shard
-  replicas: 50                      # 10 万 CCU；100 万时调到 500
+  replicas: 50                      # 固定逻辑分片；不得交给普通 HPA 改变
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -17,10 +17,20 @@ spec:
       labels:
         app: game-shard
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: game
-          image: newgame/game:latest
+          image: newgame/game:0.2.0
           args: ["-config", "/etc/newgame/game.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - { name: http, containerPort: 9100 }
             - { name: grpc, containerPort: 9150 }
@@ -29,6 +39,17 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NG_ENVIRONMENT
+              value: "production"
+            - name: NG_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: internal-secret
             - name: NG_SHARD_COUNT
               value: "50"
             - name: NG_HTTP_ADDR
@@ -42,11 +63,25 @@ spec:
             - name: NG_NATS
               value: "nats://nats:4222"
             - name: NG_POSTGRES_SHARDS
-              value: "postgres://u:p@pg0:5432/newgame?sslmode=disable,postgres://u:p@pg1:5432/newgame?sslmode=disable"
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: postgres-shards
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/newgame
+              readOnly: true
+            - name: internal-tls
+              mountPath: /etc/newgame/tls
+              readOnly: true
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 3
             periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
           resources:
             requests: { cpu: "500m", memory: "512Mi" }
             limits:   { cpu: "2",    memory: "2Gi" }
@@ -54,3 +89,20 @@ spec:
         - name: cfg
           configMap:
             name: game-config
+        - name: internal-tls
+          secret:
+            secretName: newgame-internal-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: game-shard
+  namespace: newgame
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app: game-shard
+  ports:
+    - { name: http, port: 9100, targetPort: http }
+    - { name: grpc, port: 9150, targetPort: grpc }

@@ -90,7 +90,9 @@ func (c *NotifyClient) Push(ctx context.Context, roleID int64, cmd, act uint16, 
 	var out struct {
 		Code int `json:"code"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("decode gate push response: %w", err)
+	}
 	if out.Code != 0 {
 		return ErrOffline
 	}

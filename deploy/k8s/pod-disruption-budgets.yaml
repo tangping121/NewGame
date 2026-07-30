@@ -1,0 +1,32 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: login
+  namespace: newgame
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: login
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gate
+  namespace: newgame
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: gate
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: game-shard
+  namespace: newgame
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: game-shard

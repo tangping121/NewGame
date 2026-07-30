@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: newgame-schema-migrate
+  namespace: newgame
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: newgame-schema-migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: newgame/migrate:0.2.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: NG_POSTGRES
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: postgres-central
+            - name: NG_POSTGRES_SHARDS
+              valueFrom:
+                secretKeyRef:
+                  name: newgame-secrets
+                  key: postgres-shards
+            - name: NG_SHARD_COUNT
+              value: "50"
+          resources:
+            requests: { cpu: "50m", memory: "32Mi" }
+            limits: { cpu: "250m", memory: "128Mi" }

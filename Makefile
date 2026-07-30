@@ -1,7 +1,7 @@
-.PHONY: infra up down build run-all tidy proto
+.PHONY: infra down build tidy proto fmt vet test test-race test-integration migrate docker-critical
 
 proto:
-	protoc --go_out=api/pb --go_opt=paths=source_relative -I api/proto api/proto/messages.proto
+	protoc --go_out=api/pb --go_opt=paths=source_relative --go-grpc_out=api/pb --go-grpc_opt=paths=source_relative,require_unimplemented_servers=false -I api/proto api/proto/messages.proto
 
 infra:
 	docker compose up -d
@@ -15,8 +15,26 @@ tidy:
 test:
 	go test ./...
 
+fmt:
+	gofmt -w .
+
+vet:
+	go vet ./...
+
+test-race:
+	go test -race ./...
+
 test-integration:
 	go test -tags=integration ./tests/integration/...
+
+migrate:
+	go run ./tools/migrate -dir ./deploy
+
+docker-critical:
+	docker build --build-arg SERVICE=login -t newgame/login:dev .
+	docker build --build-arg SERVICE=gate -t newgame/gate:dev .
+	docker build --build-arg SERVICE=game -t newgame/game:dev .
+	docker build -f Dockerfile.migrate -t newgame/migrate:dev .
 
 build:
 	go build -o bin/login.exe ./services/login/cmd

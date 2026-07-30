@@ -16,6 +16,8 @@ type PersistConfig struct {
 	Mode        string        // async | sync；空则 sync
 	Interval    time.Duration // 异步 flush 间隔
 	Concurrency int           // 异步 flush 并发数；<=0 默认 16
+	ShardID     int32         // 本进程拥有的逻辑分片
+	ShardCount  int32         // 固定逻辑分片总数
 }
 
 // AsyncSaver 后台批量将脏 Actor 写入 Postgres，避免每帧同步 UPDATE。
@@ -89,7 +91,9 @@ func (s *AsyncSaver) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			s.flushAll(context.Background())
+			flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			s.flushAll(flushCtx)
+			cancel()
 			return
 		case <-ticker.C:
 			s.flushAll(ctx)
@@ -154,5 +158,19 @@ func (s *AsyncSaver) FlushNow(ctx context.Context, a *Actor) error {
 		s.depth.Store(int64(len(s.pending)))
 		s.mu.Unlock()
 	}
-	return a.Save(ctx)
+	err := a.Save(ctx)
+	if err != nil && s != nil {
+		s.Schedule(a)
+	}
+	return err
+}
+
+func (s *AsyncSaver) Remove(roleID int64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.pending, roleID)
+	s.depth.Store(int64(len(s.pending)))
+	s.mu.Unlock()
 }

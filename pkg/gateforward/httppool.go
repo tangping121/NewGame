@@ -4,6 +4,7 @@ package gateforward
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -63,5 +64,19 @@ func (p *HTTPPool) Forward(ctx context.Context, target string, roleID int64, zon
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("game returned %s: %s", resp.Status, string(payload))
+	}
+	return payload, nil
+}
+
+// CloseIdleConnections releases pooled connections during graceful shutdown.
+func (p *HTTPPool) CloseIdleConnections() {
+	if transport, ok := p.client.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
 }

@@ -37,13 +37,14 @@ func main() {
 	pgOld := flag.String("pg-old", "", "旧 PG 分库 DSN（逗号分隔），执行模式必填")
 	pgNew := flag.String("pg-new", "", "新 PG 分库 DSN（逗号分隔），执行模式必填")
 	execute := flag.Bool("execute", false, "执行实际数据迁移（默认仅规划 dry-run）")
+	deleteSource := flag.Bool("delete-source", false, "校验目标行后删除源行；默认 copy-only")
 	batch := flag.Int("batch", 500, "执行模式每批角色数")
 	flag.Parse()
 
 	router := newRouter(*strategy, *old, *newCount, *replicas)
 
 	if *execute {
-		if err := runExecute(*pgOld, *pgNew, router, *batch); err != nil {
+		if err := runExecute(*pgOld, *pgNew, router, *batch, *deleteSource); err != nil {
 			fmt.Fprintln(os.Stderr, "execute error:", err)
 			os.Exit(1)
 		}
@@ -114,7 +115,7 @@ func runPlan(r router, old, newCount int, strategy string, start, end int64) {
 }
 
 // runExecute 执行模式：在旧/新 PG 分库布局间迁移变动的 roles 行。
-func runExecute(pgOld, pgNew string, r router, batch int) error {
+func runExecute(pgOld, pgNew string, r router, batch int, deleteSource bool) error {
 	oldDSNs := splitCSV(pgOld)
 	newDSNs := splitCSV(pgNew)
 	if len(oldDSNs) == 0 || len(newDSNs) == 0 {
@@ -136,19 +137,31 @@ func runExecute(pgOld, pgNew string, r router, batch int) error {
 
 	var scanned, migrated int64
 	for shardIdx, pool := range oldPool.All() {
-		rows, err := pool.Query(ctx, `SELECT id, level, snapshot FROM roles`)
+		rows, err := pool.Query(ctx,
+			`SELECT id, account_id, zone_id, name, level, snapshot, version, owner_epoch,
+			        created_at, updated_at FROM roles`)
 		if err != nil {
 			return fmt.Errorf("scan old shard %d: %w", shardIdx, err)
 		}
 		type roleRow struct {
-			id    int64
-			level int32
-			snap  []byte
+			id         int64
+			accountID  int64
+			zoneID     int32
+			name       string
+			level      int32
+			snap       []byte
+			version    int64
+			ownerEpoch int64
+			createdAt  time.Time
+			updatedAt  time.Time
 		}
 		var toMove []roleRow
 		for rows.Next() {
 			var rr roleRow
-			if err := rows.Scan(&rr.id, &rr.level, &rr.snap); err != nil {
+			if err := rows.Scan(
+				&rr.id, &rr.accountID, &rr.zoneID, &rr.name, &rr.level, &rr.snap,
+				&rr.version, &rr.ownerEpoch, &rr.createdAt, &rr.updatedAt,
+			); err != nil {
 				rows.Close()
 				return err
 			}
@@ -166,16 +179,46 @@ func runExecute(pgOld, pgNew string, r router, batch int) error {
 				end = len(toMove)
 			}
 			for _, rr := range toMove[i:end] {
-				dst := newPool.ForRole(rr.id)
+				dstIndex := r.newOf(rr.id) % len(newDSNs)
+				srcIndex := r.oldOf(rr.id) % len(oldDSNs)
+				if oldDSNs[srcIndex] == newDSNs[dstIndex] {
+					continue
+				}
+				dst := newPool.All()[dstIndex]
 				_, err := dst.Exec(ctx,
-					`INSERT INTO roles (id, level, snapshot, updated_at) VALUES ($1,$2,$3,NOW())
-					 ON CONFLICT (id) DO UPDATE SET level=EXCLUDED.level, snapshot=EXCLUDED.snapshot, updated_at=NOW()`,
-					rr.id, rr.level, rr.snap)
+					`INSERT INTO roles
+					    (id, account_id, zone_id, name, level, snapshot, version, owner_epoch, created_at, updated_at)
+					 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+					 ON CONFLICT (id) DO UPDATE
+					   SET account_id=EXCLUDED.account_id, zone_id=EXCLUDED.zone_id,
+					       name=EXCLUDED.name, level=EXCLUDED.level, snapshot=EXCLUDED.snapshot,
+					       version=EXCLUDED.version, owner_epoch=EXCLUDED.owner_epoch,
+					       updated_at=EXCLUDED.updated_at`,
+					rr.id, rr.accountID, rr.zoneID, rr.name, rr.level, rr.snap,
+					rr.version, rr.ownerEpoch+1, rr.createdAt, rr.updatedAt)
 				if err != nil {
 					return fmt.Errorf("insert role %d: %w", rr.id, err)
 				}
-				if _, err := pool.Exec(ctx, `DELETE FROM roles WHERE id=$1`, rr.id); err != nil {
-					return fmt.Errorf("delete role %d: %w", rr.id, err)
+				var copiedVersion, copiedEpoch int64
+				var copiedSnap []byte
+				if err := dst.QueryRow(ctx,
+					`SELECT version, owner_epoch, snapshot FROM roles WHERE id=$1`, rr.id,
+				).Scan(&copiedVersion, &copiedEpoch, &copiedSnap); err != nil {
+					return fmt.Errorf("verify role %d: %w", rr.id, err)
+				}
+				if copiedVersion != rr.version || copiedEpoch != rr.ownerEpoch+1 || string(copiedSnap) != string(rr.snap) {
+					return fmt.Errorf("verify role %d: destination differs", rr.id)
+				}
+				if deleteSource {
+					tag, err := pool.Exec(ctx,
+						`DELETE FROM roles WHERE id=$1 AND version=$2 AND owner_epoch=$3`,
+						rr.id, rr.version, rr.ownerEpoch)
+					if err != nil {
+						return fmt.Errorf("delete role %d: %w", rr.id, err)
+					}
+					if tag.RowsAffected() != 1 {
+						return fmt.Errorf("delete role %d: source changed during copy", rr.id)
+					}
 				}
 				migrated++
 			}

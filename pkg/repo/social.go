@@ -23,6 +23,12 @@ func NewSocialRepo(pool *pgxpool.Pool) *SocialRepo {
 	return &SocialRepo{pool: pool}
 }
 
+func (r *SocialRepo) Close() {
+	if r != nil && r.pool != nil {
+		r.pool.Close()
+	}
+}
+
 func (r *SocialRepo) AddFriend(ctx context.Context, roleID, friendID int64) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO friends (role_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,

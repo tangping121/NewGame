@@ -86,7 +86,7 @@ func TestIntegrationZones(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var out struct {
-		Code  int `json:"code"`
+		Code  int   `json:"code"`
 		Zones []any `json:"zones"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&out)

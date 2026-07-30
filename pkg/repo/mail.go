@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,6 +20,36 @@ type Mail struct {
 	CreatedAt time.Time // 创建时间
 }
 
+// InsertEvent stores a mail event exactly once for this consumer.
+func (r *MailRepo) InsertEvent(ctx context.Context, eventID string, m Mail) (bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var inserted string
+	err = tx.QueryRow(ctx,
+		`INSERT INTO event_inbox (consumer, event_id) VALUES ('mail', $1)
+		 ON CONFLICT DO NOTHING RETURNING event_id`, eventID,
+	).Scan(&inserted)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO mails (role_id, title, content, items) VALUES ($1, $2, $3, $4)`,
+		m.RoleID, m.Title, m.Content, m.Items,
+	); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // MailRepo 邮件 CRUD 与已读/领取状态更新。
 type MailRepo struct {
 	pool *pgxpool.Pool
@@ -27,6 +58,12 @@ type MailRepo struct {
 // NewMailRepo 创建邮件仓库。
 func NewMailRepo(pool *pgxpool.Pool) *MailRepo {
 	return &MailRepo{pool: pool}
+}
+
+func (r *MailRepo) Close() {
+	if r != nil && r.pool != nil {
+		r.pool.Close()
+	}
 }
 
 // Insert 发送一封新邮件。

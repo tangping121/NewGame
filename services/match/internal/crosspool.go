@@ -9,7 +9,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-const poolKeyPrefix = "ng:match:pool:"
+const poolKeyPrefix = "ng:match:"
 
 // joinScript Redis Lua：原子入队并尝试凑满匹配。
 // KEYS[1]=队列键；ARGV[1]=成员 z{zone}:{role}；ARGV[2]=所需人数 need。
@@ -51,8 +51,8 @@ func NewCrossPool(rdb goredis.UniversalClient) *CrossPool {
 	return &CrossPool{rdb: rdb}
 }
 
-func poolKey(mode int32) string {
-	return fmt.Sprintf("%s%d", poolKeyPrefix, mode)
+func poolKey(scope string, mode int32) string {
+	return fmt.Sprintf("%s{%s:%d}:pool", poolKeyPrefix, scope, mode)
 }
 
 // MemberKey 将区服与角色编码为队列成员字符串。
@@ -64,6 +64,22 @@ func poolKey(mode int32) string {
 // 返回: 如 "z2:10002"
 func MemberKey(zoneID int32, roleID int64) string {
 	return fmt.Sprintf("z%d:%d", zoneID, roleID)
+}
+
+// Requeue compensates a failed room creation. LREM+RPUSH keeps every member
+// present exactly once in the waiting list.
+func (p *CrossPool) Requeue(ctx context.Context, scope string, mode int32, entries []QueueEntry) error {
+	if p.rdb == nil {
+		return fmt.Errorf("redis required for match compensation")
+	}
+	pipe := p.rdb.TxPipeline()
+	key := poolKey(scope, mode)
+	for _, entry := range entries {
+		pipe.LRem(ctx, key, 0, entry.Raw)
+		pipe.RPush(ctx, key, entry.Raw)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 // ParseMember 解析 MemberKey 生成的字符串。
@@ -103,12 +119,14 @@ func ParseMember(raw string) (QueueEntry, error) {
 // 返回:
 //   - []QueueEntry: 凑满 need 人时返回被匹配的一组；否则 nil
 //   - error: Redis 错误或 rdb 为 nil
-func (p *CrossPool) Join(ctx context.Context, mode int32, zoneID int32, roleID int64, need int) ([]QueueEntry, error) {
+func (p *CrossPool) Join(
+	ctx context.Context, scope string, mode int32, zoneID int32, roleID int64, need int,
+) ([]QueueEntry, error) {
 	if p.rdb == nil {
 		return nil, fmt.Errorf("redis required for cross-zone match")
 	}
 	member := MemberKey(zoneID, roleID)
-	res, err := joinScript.Run(ctx, p.rdb, []string{poolKey(mode)}, member, need).StringSlice()
+	res, err := joinScript.Run(ctx, p.rdb, []string{poolKey(scope, mode)}, member, need).StringSlice()
 	if err != nil {
 		return nil, err
 	}
@@ -131,9 +149,9 @@ func (p *CrossPool) Join(ctx context.Context, mode int32, zoneID int32, roleID i
 // 参数:
 //   - ctx: Redis 上下文
 //   - mode: 匹配模式 ID
-func (p *CrossPool) QueueSize(ctx context.Context, mode int32) (int64, error) {
+func (p *CrossPool) QueueSize(ctx context.Context, scope string, mode int32) (int64, error) {
 	if p.rdb == nil {
 		return 0, nil
 	}
-	return p.rdb.LLen(ctx, poolKey(mode)).Result()
+	return p.rdb.LLen(ctx, poolKey(scope, mode)).Result()
 }

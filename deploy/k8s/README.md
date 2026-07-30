@@ -1,50 +1,61 @@
-# Kubernetes 部署（P4）
+# Kubernetes 部署
 
-面向 10 万～100 万 CCU 的参考部署清单。详见 [../../docs/architecture-scale.md](../../docs/architecture-scale.md)。
+这里的清单提供生产部署基线，包含 Login、Gate、固定逻辑 Game 分片、数据库迁移、mTLS、网络策略、PDB、探针和 Gate HPA。Redis Cluster、PostgreSQL、NATS JetStream、Ingress/L4 LB、证书签发和监控适配器应由平台统一提供。
 
-## 组件
+## 关键约束
 
-| 文件 | 作用 |
-|------|------|
-| `namespace.yaml` | 命名空间 newgame |
-| `login-deployment.yaml` | Login（无状态）+ Service |
-| `gate-deployment.yaml` | Gate（接入层）+ LoadBalancer（L4 粘滞） |
-| `game-statefulset.yaml` | Game 分片集群（game-shard-0..N-1） |
-| `game-hpa.yaml` | Game/Gate 自动扩缩（自定义指标） |
+- Game 使用 StatefulSet，Pod 序号就是逻辑 `shard_id`。
+- `NG_SHARD_COUNT` 是持久化路由的一部分，不能由 HPA 修改。改变它之前必须先用 `tools/reshard` 迁移并核对数据。
+- Gate 和 Login 可以水平扩缩；Game 只能按经过审批的重分片方案改变副本数。
+- Gate→Game gRPC 使用 protobuf、共享内部令牌和双向 TLS。证书必须包含 `game-shard.newgame.svc` DNS SAN，并允许 `serverAuth` 和 `clientAuth`。
+- 所有数据库必须先执行 `migration-job.yaml`。迁移器会锁库、按数字版本执行、校验已应用脚本的 SHA-256，并按 `NG_SHARD_COUNT` 汇总中心角色目录。
+- `secret.example.yaml` 只是字段示例。实际 Secret 应由 External Secrets、Vault 或同类系统注入，不能提交到 Git。
 
-## 关键设计
+## 镜像
 
-- **Game 用 StatefulSet**：pod 名稳定有序，`POD_NAME` 末尾序号 → `shard_id`（见 `pkg/config` 环境覆盖）。
-- **同一 role_id 永远进同一分片**：扩容改 `NG_SHARD_COUNT` 需配合数据迁移，不可运行时随意改模数。
-- **Gate 用 Deployment + LoadBalancer**：`externalTrafficPolicy: Local` 保留客户端 IP，连接生命周期内粘滞。
-- **配置优先级**：环境变量 > YAML（容器内只需基础 YAML，差异项用 env 注入）。
+```bash
+docker build --build-arg SERVICE=login -t registry.example/newgame/login:0.2.0 .
+docker build --build-arg SERVICE=gate  -t registry.example/newgame/gate:0.2.0 .
+docker build --build-arg SERVICE=game  -t registry.example/newgame/game:0.2.0 .
+docker build -f Dockerfile.migrate -t registry.example/newgame/migrate:0.2.0 .
+```
 
-## 环境变量（容器注入）
-
-| 变量 | 说明 |
-|------|------|
-| `POD_NAME` | StatefulSet pod 名，取末尾序号作 shard_id |
-| `NG_SHARD_ID` / `NG_SHARD_COUNT` | 显式分片号 / 总分片数 |
-| `NG_HTTP_ADDR` / `NG_TCP_ADDR` / `NG_GRPC_ADDR` | 监听地址 |
-| `NG_ZONE_ID` | 区服 |
-| `NG_REDIS` / `NG_REDIS_CLUSTER` | 单机 / 集群（逗号分隔） |
-| `NG_POSTGRES` / `NG_POSTGRES_SHARDS` | 单库 / 分库（逗号分隔） |
-| `NG_NATS` | NATS 地址 |
+推送镜像后，将清单里的示例镜像名替换为不可变 digest 或正式版本号。
 
 ## 部署顺序
 
 ```bash
 kubectl apply -f namespace.yaml
-# 先部署 redis-cluster / postgres / nats（本目录未含，按需自备 Operator/StatefulSet）
+kubectl apply -f secret.yaml
+kubectl apply -f configmaps.yaml
+
+kubectl apply -f migration-job.yaml
+kubectl wait --for=condition=complete job/newgame-schema-migrate -n newgame --timeout=10m
+
+kubectl apply -f network-policy.yaml
+kubectl apply -f pod-disruption-budgets.yaml
 kubectl apply -f login-deployment.yaml
 kubectl apply -f game-statefulset.yaml
 kubectl apply -f gate-deployment.yaml
-kubectl apply -f game-hpa.yaml          # 需 prometheus-adapter 提供自定义指标
+
+# 需要 metrics adapter 暴露 ng_gate_connections。
+kubectl apply -f game-hpa.yaml
 ```
 
-## 压测
+## 发布检查
 
 ```bash
-# TCP 长连接压测（建连 + 持续收发 + 延迟分位）
-go run ./tools/cctest -login http://<login>/api/login -conns 15000 -duration 60s -rate 1
+kubectl rollout status deployment/login -n newgame
+kubectl rollout status statefulset/game-shard -n newgame
+kubectl rollout status deployment/gate -n newgame
+kubectl get pods,svc,pdb,hpa -n newgame
 ```
+
+发布前还应确认：
+
+- Secret 中的中心库及所有分片 DSN 都启用 TLS；
+- NATS 是启用 JetStream 的持久化集群；
+- Redis 使用 Cluster 或高可用部署，并启用持久化；
+- Game StatefulSet 副本数与 `NG_SHARD_COUNT` 完全一致；
+- `newgame-public-addresses.gate_tcp` 是客户端实际可访问的 L4 地址；
+- `/readyz`、`/livez` 和 `/metrics/prometheus` 已接入探针和监控。

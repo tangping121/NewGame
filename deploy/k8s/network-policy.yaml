@@ -1,0 +1,52 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: game-internal-ingress
+  namespace: newgame
+spec:
+  podSelector:
+    matchLabels:
+      app: game-shard
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: newgame
+      ports:
+        - { protocol: TCP, port: 9100 }
+        - { protocol: TCP, port: 9150 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gate-public-ingress
+  namespace: newgame
+spec:
+  podSelector:
+    matchLabels:
+      app: gate
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 9000 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: newgame
+      ports:
+        - { protocol: TCP, port: 9001 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: login-public-ingress
+  namespace: newgame
+spec:
+  podSelector:
+    matchLabels:
+      app: login
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }

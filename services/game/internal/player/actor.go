@@ -4,6 +4,8 @@ package player
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -16,18 +18,26 @@ import (
 	"newgame/services/game/internal/skill"
 )
 
+var (
+	ErrInsufficientGold = errors.New("insufficient gold")
+	ErrInsufficientItem = errors.New("insufficient item")
+)
+
 // Actor 单个在线玩家的游戏实体，对应一条 role 记录的运行时视图。
 type Actor struct {
-	ID         int64          // 角色 ID
-	Level      int32          // 等级
-	Gold       int64          // 金币
-	Inv        bag.Inventory  // 背包
-	Skills     skill.Book     // 技能书
-	Quests     quest.State    // 任务状态
-	GuildID    int64          // 公会 ID
-	mailbox    *actor.Mailbox // 串行消息邮箱（Actor 模型）
-	repo       *repo.RoleRepo // 持久化；nil 时不写库
-	lastActive atomic.Int64   // 最近活跃 Unix 秒，供空闲淘汰
+	ID         int64               // 角色 ID
+	Level      int32               // 等级
+	Gold       int64               // 金币
+	Inv        bag.Inventory       // 背包
+	Skills     skill.Book          // 技能书
+	Quests     quest.State         // 任务状态
+	GuildID    int64               // 公会 ID
+	version    int64               // optimistic snapshot version
+	ownerEpoch int64               // shard fencing token
+	applied    map[string]struct{} // in-memory idempotency for tests/dev
+	mailbox    *actor.Mailbox      // 串行消息邮箱（Actor 模型）
+	repo       *repo.RoleRepo      // 持久化；nil 时不写库
+	lastActive atomic.Int64        // 最近活跃 Unix 秒，供空闲淘汰
 }
 
 // New 从数据库快照构造玩家 Actor。
@@ -42,15 +52,24 @@ func New(id int64, snap repo.RoleSnapshot, roles *repo.RoleRepo) *Actor {
 		inv = bag.New()
 	}
 	a := &Actor{
-		ID:      id,
-		Level:   snap.Level,
-		Gold:    snap.Gold,
-		Inv:     inv,
-		Skills:  skill.FromSnapshot(snap),
-		Quests:  quest.FromSnapshot(snap),
-		GuildID: snap.GuildID,
-		mailbox: actor.NewMailbox(128),
-		repo:    roles,
+		ID:         id,
+		Level:      snap.Level,
+		Gold:       snap.Gold,
+		Inv:        inv,
+		Skills:     skill.FromSnapshot(snap),
+		Quests:     quest.FromSnapshot(snap),
+		GuildID:    snap.GuildID,
+		version:    snap.Version,
+		ownerEpoch: snap.OwnerEpoch,
+		applied:    make(map[string]struct{}),
+		mailbox:    actor.NewMailbox(128),
+		repo:       roles,
+	}
+	if a.version <= 0 {
+		a.version = 1
+	}
+	if a.ownerEpoch <= 0 {
+		a.ownerEpoch = 1
 	}
 	a.touch()
 	return a
@@ -73,7 +92,7 @@ func (p *Actor) PlayerID() int64 { return p.ID }
 func (p *Actor) Handle(ctx context.Context, cmd, act uint16, payload []byte) ([]byte, error) {
 	_ = ctx
 	if cmd != protocol.CmdGame {
-		return json.Marshal(map[string]any{"role_id": p.ID, "echo": string(payload)})
+		return nil, fmt.Errorf("unsupported command %d", cmd)
 	}
 	switch act {
 	case protocol.ActPlayerData:
@@ -114,12 +133,7 @@ func (p *Actor) Handle(ctx context.Context, cmd, act uint16, payload []byte) ([]
 		}
 		return json.Marshal(map[string]any{"code": 0, "quest_id": req.QuestID})
 	default:
-		return json.Marshal(map[string]any{
-			"role_id": p.ID,
-			"cmd":     cmd,
-			"act":     act,
-			"echo":    string(payload),
-		})
+		return nil, fmt.Errorf("unsupported game action %d", act)
 	}
 }
 
@@ -135,13 +149,15 @@ func (p *Actor) Invoke(ctx context.Context, fn func(*Actor) ([]byte, error)) ([]
 func (p *Actor) snapshotUnsafe() repo.RoleSnapshot {
 	qs, qp := p.Quests.ToSnapshotFields()
 	return repo.RoleSnapshot{
-		Level:     p.Level,
-		Gold:      p.Gold,
-		Bag:       p.Inv.Clone(),
-		Skills:    p.Skills.ToMap(),
-		Quests:    cloneInt32Map(qs),
-		QuestProg: cloneInt32Map(qp),
-		GuildID:   p.GuildID,
+		Level:      p.Level,
+		Gold:       p.Gold,
+		Bag:        p.Inv.Clone(),
+		Skills:     p.Skills.ToMap(),
+		Quests:     cloneInt32Map(qs),
+		QuestProg:  cloneInt32Map(qp),
+		GuildID:    p.GuildID,
+		Version:    p.version,
+		OwnerEpoch: p.ownerEpoch,
 	}
 }
 
@@ -167,7 +183,11 @@ func (p *Actor) saveUnsafe(ctx context.Context) error {
 	if p.repo == nil {
 		return nil
 	}
-	return p.repo.Save(ctx, p.ID, p.snapshotUnsafe())
+	version, err := p.repo.Save(ctx, p.ID, p.snapshotUnsafe())
+	if err == nil {
+		p.version = version
+	}
+	return err
 }
 
 // Save 将当前 Actor 状态写入 Postgres roles 表。
@@ -183,6 +203,28 @@ func (p *Actor) Save(ctx context.Context) error {
 	_, err := p.mailbox.Call(ctx, func() ([]byte, error) {
 		return nil, p.saveUnsafe(ctx)
 	})
+	return err
+}
+
+// SaveWithOutbox commits the current state and projection event atomically.
+func (p *Actor) SaveWithOutbox(ctx context.Context, event repo.OutboxEvent) error {
+	if p.repo == nil {
+		return nil
+	}
+	_, err := p.mailbox.Call(ctx, func() ([]byte, error) {
+		return nil, p.saveWithOutboxUnsafe(ctx, event)
+	})
+	return err
+}
+
+func (p *Actor) saveWithOutboxUnsafe(ctx context.Context, event repo.OutboxEvent) error {
+	if p.repo == nil {
+		return nil
+	}
+	version, err := p.repo.SaveWithOutbox(ctx, p.ID, p.snapshotUnsafe(), event)
+	if err == nil {
+		p.version = version
+	}
 	return err
 }
 
@@ -228,15 +270,75 @@ func (p *Actor) SetGuild(id int64) {
 // 参数:
 //   - ctx: 持久化上下文
 //   - b: 金币与道具包
-func (p *Actor) ApplyGrant(ctx context.Context, b grant.Bundle) error {
+func (p *Actor) ApplyGrant(ctx context.Context, b grant.Bundle, source string) (bool, error) {
+	var applied bool
 	_, err := p.Invoke(ctx, func(a *Actor) ([]byte, error) {
-		if b.Gold > 0 {
-			a.AddGold(b.Gold)
+		if source != "" {
+			if _, ok := a.applied[source]; ok && a.repo == nil {
+				return nil, nil
+			}
 		}
-		for item, n := range b.Items {
-			a.Inv.Add(item, n)
+		before := a.snapshotUnsafe()
+		if err := a.applyBundleUnsafe(b); err != nil {
+			return nil, err
 		}
-		return nil, a.saveUnsafe(ctx)
+		after := a.snapshotUnsafe()
+		if a.repo == nil {
+			if source != "" {
+				a.applied[source] = struct{}{}
+			}
+			applied = true
+			return nil, nil
+		}
+		version, inserted, err := a.repo.SaveIdempotent(ctx, a.ID, source, "grant", after, b)
+		if err != nil {
+			a.restoreUnsafe(before)
+			return nil, err
+		}
+		if !inserted {
+			latest, loadErr := a.repo.Load(ctx, a.ID)
+			if loadErr != nil {
+				a.restoreUnsafe(before)
+				return nil, loadErr
+			}
+			a.restoreUnsafe(latest)
+			return nil, nil
+		}
+		a.version = version
+		applied = true
+		return nil, nil
 	})
-	return err
+	return applied, err
+}
+
+func (p *Actor) applyBundleUnsafe(b grant.Bundle) error {
+	if b.Gold < 0 && p.Gold < -b.Gold {
+		return ErrInsufficientGold
+	}
+	for item, n := range b.Items {
+		if n < 0 && p.Inv[item] < -n {
+			return fmt.Errorf("%w: %s", ErrInsufficientItem, item)
+		}
+	}
+	p.Gold += b.Gold
+	for item, n := range b.Items {
+		switch {
+		case n > 0:
+			p.Inv.Add(item, n)
+		case n < 0:
+			_ = p.Inv.Remove(item, -n)
+		}
+	}
+	return nil
+}
+
+func (p *Actor) restoreUnsafe(s repo.RoleSnapshot) {
+	p.Level = s.Level
+	p.Gold = s.Gold
+	p.Inv = s.Bag
+	p.Skills = skill.FromSnapshot(s)
+	p.Quests = quest.FromSnapshot(s)
+	p.GuildID = s.GuildID
+	p.version = s.Version
+	p.ownerEpoch = s.OwnerEpoch
 }

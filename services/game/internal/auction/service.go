@@ -3,9 +3,11 @@ package auction
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
+	"newgame/pkg/grant"
 	"newgame/pkg/repo"
 	"newgame/services/game/internal/player"
 )
@@ -23,9 +25,14 @@ type Listing struct {
 type Service struct {
 	repo    *repo.AuctionRepo // 拍卖表；nil 用 mem
 	players *player.Manager   // 玩家 Actor，用于扣/add 物品与金币
+	router  Granter           // routes seller payout to the owning Game shard
 	mem     []Listing         // 内存模式挂牌列表
 	nextID  int64             // 内存模式自增 ID
 	mu      sync.RWMutex      // protects mem and nextID
+}
+
+type Granter interface {
+	Grant(context.Context, int64, grant.Bundle, string) error
 }
 
 // New 创建拍卖服务。
@@ -33,8 +40,12 @@ type Service struct {
 // 参数:
 //   - r: 拍卖仓库；可为 nil
 //   - players: 玩家管理器，不可为 nil
-func New(r *repo.AuctionRepo, players *player.Manager) *Service {
-	return &Service{repo: r, players: players, mem: []Listing{}}
+func New(r *repo.AuctionRepo, players *player.Manager, routers ...Granter) *Service {
+	var router Granter
+	if len(routers) > 0 {
+		router = routers[0]
+	}
+	return &Service{repo: r, players: players, router: router, mem: []Listing{}}
 }
 
 // List 列出在售挂牌。
@@ -72,39 +83,54 @@ func (s *Service) List(ctx context.Context, limit int) ([]Listing, error) {
 //
 // 返回: 新挂牌；背包不足或 DB 失败时 error（失败会回滚背包）
 func (s *Service) Create(ctx context.Context, sellerRoleID int64, itemID string, qty int32, price int64) (Listing, error) {
+	return s.CreateWithKey(ctx, sellerRoleID, itemID, qty, price, "")
+}
+
+// CreateWithKey persists the auction saga before moving the item into escrow.
+func (s *Service) CreateWithKey(
+	ctx context.Context, sellerRoleID int64, itemID string, qty int32, price int64, requestKey string,
+) (Listing, error) {
 	if sellerRoleID <= 0 || itemID == "" || qty <= 0 || price <= 0 {
 		return Listing{}, fmt.Errorf("invalid listing")
 	}
-	var removed bool
-	if err := s.players.WithPlayer(ctx, sellerRoleID, func(pl *player.Actor) error {
-		removed = pl.Inv.Remove(itemID, qty)
-		return nil
-	}); err != nil {
-		return Listing{}, err
-	}
-	if !removed {
-		return Listing{}, fmt.Errorf("insufficient items")
-	}
-	if err := s.players.SaveNow(ctx, sellerRoleID); err != nil {
-		_ = s.players.WithPlayer(ctx, sellerRoleID, func(pl *player.Actor) error {
-			pl.Inv.Add(itemID, qty)
-			return nil
-		})
-		return Listing{}, err
-	}
 	if s.repo != nil {
-		id, err := s.repo.Create(ctx, repo.AuctionListing{
+		if requestKey == "" {
+			return Listing{}, fmt.Errorf("request_id required")
+		}
+		pending, err := s.repo.GetOrCreatePending(ctx, requestKey, repo.AuctionListing{
 			SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price,
 		})
 		if err != nil {
-			_ = s.players.WithPlayer(ctx, sellerRoleID, func(pl *player.Actor) error {
-				pl.Inv.Add(itemID, qty)
-				return nil
-			})
-			_ = s.players.SaveNow(ctx, sellerRoleID)
 			return Listing{}, err
 		}
-		return Listing{ID: id, SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price}, nil
+		if pending.SellerRoleID != sellerRoleID || pending.ItemID != itemID ||
+			pending.Qty != qty || pending.Price != price {
+			return Listing{}, fmt.Errorf("request_id already used with different listing")
+		}
+		if pending.Status == repo.AuctionOpen {
+			return Listing{ID: pending.ID, SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price}, nil
+		}
+		if pending.Status != repo.AuctionPending {
+			return Listing{}, fmt.Errorf("listing cannot be activated")
+		}
+		_, _, err = s.players.ApplyGrant(ctx, sellerRoleID, grant.Bundle{
+			Items: map[string]int32{itemID: -qty},
+		}, fmt.Sprintf("auction:escrow:%d", pending.ID))
+		if err != nil {
+			return Listing{}, err
+		}
+		if err := s.repo.Activate(ctx, pending.ID, sellerRoleID); err != nil {
+			return Listing{}, err
+		}
+		return Listing{ID: pending.ID, SellerRoleID: sellerRoleID, ItemID: itemID, Qty: qty, Price: price}, nil
+	}
+	if err := s.players.WithPlayerSaved(ctx, sellerRoleID, func(pl *player.Actor) error {
+		if !pl.Inv.Remove(itemID, qty) {
+			return fmt.Errorf("insufficient items")
+		}
+		return nil
+	}); err != nil {
+		return Listing{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,48 +157,43 @@ func (s *Service) Buy(ctx context.Context, buyerRoleID, listingID int64) (Listin
 		if err != nil {
 			return Listing{}, fmt.Errorf("listing not found")
 		}
-		if l.Status != repo.AuctionOpen {
+		if l.Status == repo.AuctionSold && l.BuyerRoleID == buyerRoleID {
+			return Listing{ID: l.ID, SellerRoleID: l.SellerRoleID, ItemID: l.ItemID, Qty: l.Qty, Price: l.Price}, nil
+		}
+		if l.Status != repo.AuctionOpen && !(l.Status == repo.AuctionReserved && l.BuyerRoleID == buyerRoleID) {
 			return Listing{}, fmt.Errorf("listing not available")
 		}
 		if l.SellerRoleID == buyerRoleID {
 			return Listing{}, fmt.Errorf("cannot buy own listing")
 		}
-		var paid bool
-		if err := s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
-			paid = buyer.SpendGold(l.Price)
-			if paid {
-				buyer.Inv.Add(l.ItemID, l.Qty)
-			}
-			return nil
-		}); err != nil {
-			return Listing{}, err
-		}
-		if !paid {
-			return Listing{}, fmt.Errorf("insufficient gold")
-		}
-		if err := s.players.SaveNow(ctx, buyerRoleID); err != nil {
-			_ = s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
-				buyer.AddGold(l.Price)
-				buyer.Inv.Remove(l.ItemID, l.Qty)
-				return nil
-			})
-			_ = s.players.SaveNow(ctx, buyerRoleID)
-			return Listing{}, err
-		}
-		if err := s.repo.MarkSold(ctx, listingID, buyerRoleID); err != nil {
-			_ = s.players.WithPlayer(ctx, buyerRoleID, func(buyer *player.Actor) error {
-				buyer.AddGold(l.Price)
-				buyer.Inv.Remove(l.ItemID, l.Qty)
-				return nil
-			})
-			_ = s.players.SaveNow(ctx, buyerRoleID)
+		l, err = s.repo.Reserve(ctx, listingID, buyerRoleID)
+		if err != nil {
 			return Listing{}, fmt.Errorf("listing not available")
 		}
-		_ = s.players.WithPlayer(ctx, l.SellerRoleID, func(seller *player.Actor) error {
-			seller.AddGold(l.Price)
-			return nil
-		})
-		_ = s.players.SaveNow(ctx, l.SellerRoleID)
+		_, _, err = s.players.ApplyGrant(ctx, buyerRoleID, grant.Bundle{
+			Gold: -l.Price, Items: map[string]int32{l.ItemID: l.Qty},
+		}, fmt.Sprintf("auction:buyer:%d", l.ID))
+		if err != nil {
+			if errors.Is(err, player.ErrInsufficientGold) {
+				if releaseErr := s.repo.ReleaseReservation(ctx, l.ID, buyerRoleID); releaseErr != nil {
+					return Listing{}, fmt.Errorf("release failed reservation: %w", releaseErr)
+				}
+			}
+			return Listing{}, err
+		}
+		payout := grant.Bundle{Gold: l.Price, Items: map[string]int32{}}
+		if s.router != nil {
+			if err := s.router.Grant(ctx, l.SellerRoleID, payout, fmt.Sprintf("auction:seller:%d", l.ID)); err != nil {
+				return Listing{}, err
+			}
+		} else {
+			if _, _, err := s.players.ApplyGrant(ctx, l.SellerRoleID, payout, fmt.Sprintf("auction:seller:%d", l.ID)); err != nil {
+				return Listing{}, err
+			}
+		}
+		if err := s.repo.MarkSold(ctx, listingID, buyerRoleID); err != nil {
+			return Listing{}, err
+		}
 		return Listing{ID: l.ID, SellerRoleID: l.SellerRoleID, ItemID: l.ItemID, Qty: l.Qty, Price: l.Price}, nil
 	}
 	s.mu.Lock()
