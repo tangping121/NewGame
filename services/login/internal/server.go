@@ -32,6 +32,8 @@ import (
 
 const loginAttemptsPerMinute = 10
 
+// loginRateScript 用单条 Lua 脚本原子完成计数和首次过期时间设置，
+// 保证多个 Login 副本同时处理同一账号时仍共享一个固定窗口。
 var loginRateScript = goredis.NewScript(`
 local count = redis.call('INCR', KEYS[1])
 if count == 1 then
@@ -188,12 +190,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// loginRateKey 先规范化并哈希用户名，避免把账号明文写进 Redis key。
+// 花括号是 Redis Cluster hash-tag，使该账号的限流操作稳定落在同一 slot。
 func loginRateKey(username string) string {
 	normalized := strings.ToLower(strings.TrimSpace(username))
 	sum := sha256.Sum256([]byte(normalized))
 	return fmt.Sprintf("ng:login:rate:{%x}", sum[:16])
 }
 
+// loginRateLimited 按规范化用户名限制分布式密码尝试次数。
+// 不直接采用来源 IP，是为了避免负载均衡或 NAT 下大量正常用户共用一个 IP。
 func (s *Server) loginRateLimited(ctx context.Context, username string) (bool, error) {
 	if s.redis == nil {
 		return false, fmt.Errorf("redis unavailable")

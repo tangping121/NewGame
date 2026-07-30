@@ -72,23 +72,27 @@ type Service struct {
 	Payment           PaymentConfig `yaml:"payment"`             // 支付商品与回调签名
 }
 
+// InternalTLS 描述服务间 gRPC 的双向 TLS 配置。
+// CA、证书和私钥同时用于客户端与服务端身份校验；ServerName 仅由客户端
+// 校验目标服务证书，必须与证书的 DNS SAN 一致。
 type InternalTLS struct {
-	Enabled    bool   `yaml:"enabled"`
-	CAFile     string `yaml:"ca_file"`
-	CertFile   string `yaml:"cert_file"`
-	KeyFile    string `yaml:"key_file"`
-	ServerName string `yaml:"server_name"`
+	Enabled    bool   `yaml:"enabled"`     // 是否启用内部 mTLS
+	CAFile     string `yaml:"ca_file"`     // 信任的内部 CA PEM
+	CertFile   string `yaml:"cert_file"`   // 当前服务的证书链 PEM
+	KeyFile    string `yaml:"key_file"`    // 当前服务的私钥 PEM
+	ServerName string `yaml:"server_name"` // 客户端期望的目标 DNS 名称
 }
 
 // PaymentConfig keeps payment-provider verification separate from internal
 // service authentication. Product prices are authoritative server-side values.
 type PaymentConfig struct {
-	WebhookSecret string           `yaml:"webhook_secret"`
-	MaxSkewSec    int              `yaml:"max_skew_sec"`
-	Currency      string           `yaml:"currency"`
-	Products      map[string]int32 `yaml:"products"`
+	WebhookSecret string           `yaml:"webhook_secret"` // 支付平台回调 HMAC 密钥
+	MaxSkewSec    int              `yaml:"max_skew_sec"`   // 回调时间戳最大偏差；默认 300 秒
+	Currency      string           `yaml:"currency"`       // ISO 4217 三字母币种；默认 CNY
+	Products      map[string]int32 `yaml:"products"`       // 服务端权威商品价格，客户端金额不可信
 }
 
+// MaxSkew 返回支付回调允许的最大时间偏差，未配置时为 5 分钟。
 func (p PaymentConfig) MaxSkew() time.Duration {
 	if p.MaxSkewSec <= 0 {
 		return 5 * time.Minute
@@ -96,6 +100,7 @@ func (p PaymentConfig) MaxSkew() time.Duration {
 	return time.Duration(p.MaxSkewSec) * time.Second
 }
 
+// CurrencyCode 返回规范化的大写币种代码，未配置时使用 CNY。
 func (p PaymentConfig) CurrencyCode() string {
 	currency := strings.TrimSpace(p.Currency)
 	if currency == "" {

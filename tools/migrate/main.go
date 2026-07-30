@@ -1,3 +1,8 @@
+// Command migrate 对中心库和所有角色分库执行版本化迁移。
+//
+// 每个数据库通过 PostgreSQL advisory lock 串行执行迁移；已应用脚本记录
+// SHA-256，后续发布如果修改历史脚本会直接失败。所有库完成 schema 迁移后，
+// 工具再把物理分库中的角色索引汇总到中心 role_directory。
 package main
 
 import (
@@ -30,6 +35,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	// 先确保中心库和所有物理角色分库具有完全一致的 schema 版本。
 	for i, databaseDSN := range dsns {
 		if err := run(ctx, databaseDSN, *dir); err != nil {
 			panic(fmt.Errorf("database %d: %w", i, err))
@@ -43,6 +49,7 @@ func main() {
 	if len(roleDSNs) == 0 {
 		roleDSNs = []string{centralDSN}
 	}
+	// schema 就绪后再汇总目录，避免中心库提前指向尚未完成迁移的分库。
 	if err := syncRoleDirectory(ctx, centralDSN, roleDSNs, *shardCount); err != nil {
 		panic(fmt.Errorf("sync role directory: %w", err))
 	}
@@ -87,6 +94,8 @@ func envInt(name string, fallback int) int {
 	return number
 }
 
+// migrationFiles 强制使用 migrate_vN.sql 命名并按数字版本排序。
+// 不能使用普通字符串排序，否则 v10 会错误地排在 v2 前面。
 func migrationFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -146,6 +155,8 @@ const upsertDirectoryRoleSQL = `
 	      shard_id = EXCLUDED.shard_id,
 	      updated_at = GREATEST(role_directory.updated_at, EXCLUDED.updated_at)`
 
+// syncRoleDirectory 扫描所有物理角色分库，并把登录所需的轻量目录汇总到中心库。
+// role_directory.shard_id 是逻辑 Game 分片号，不是 roleDSNs 中的物理库索引。
 func syncRoleDirectory(ctx context.Context, centralDSN string, roleDSNs []string, shardCount int) error {
 	if shardCount <= 0 {
 		return fmt.Errorf("shard count must be positive")
@@ -172,6 +183,8 @@ func syncRoleDirectory(ctx context.Context, centralDSN string, roleDSNs []string
 	return nil
 }
 
+// syncRoleShard 流式扫描单个物理分库，并分批写入中心库。
+// 固定批量可以限制内存占用，同时避免逐行网络往返。
 func syncRoleShard(
 	ctx context.Context, central, source *pgxpool.Pool, shardCount int,
 ) error {
@@ -230,6 +243,7 @@ func syncRoleShard(
 	return flush()
 }
 
+// roleShard 必须与运行时 shard.ForRole 的取模规则保持一致。
 func roleShard(roleID int64, shardCount int) int {
 	shardID := roleID % int64(shardCount)
 	if shardID < 0 {
@@ -238,6 +252,8 @@ func roleShard(roleID int64, shardCount int) int {
 	return int(shardID)
 }
 
+// run 在单个数据库连接上持有 advisory lock，并逐文件事务化执行迁移。
+// 迁移记录与业务 DDL 在同一事务提交，进程中断后可以安全重试。
 func run(ctx context.Context, dsn, dir string) error {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {

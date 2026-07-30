@@ -38,7 +38,9 @@ type QueueEntry struct {
 	Raw    string // Redis 中原始成员串，如 z1:10001
 }
 
-// CrossPool 基于 Redis List 的跨服匹配等待队列。
+// CrossPool 基于 Redis List 的共享匹配等待队列。
+// scope="global" 用于跨区匹配，scope="zone:N" 用于区内多副本共享队列；
+// 两种模式复用相同原子入队算法，但绝不能共享同一个 Redis key。
 type CrossPool struct {
 	rdb goredis.UniversalClient // Redis 客户端，nil 时 Join 报错
 }
@@ -51,6 +53,8 @@ func NewCrossPool(rdb goredis.UniversalClient) *CrossPool {
 	return &CrossPool{rdb: rdb}
 }
 
+// poolKey 将匹配范围和模式同时放入 Redis Cluster hash-tag。
+// 同一队列的 Lua 操作因此位于一个 slot，不同区服或模式不会串队。
 func poolKey(scope string, mode int32) string {
 	return fmt.Sprintf("%s{%s:%d}:pool", poolKeyPrefix, scope, mode)
 }
@@ -66,8 +70,8 @@ func MemberKey(zoneID int32, roleID int64) string {
 	return fmt.Sprintf("z%d:%d", zoneID, roleID)
 }
 
-// Requeue compensates a failed room creation. LREM+RPUSH keeps every member
-// present exactly once in the waiting list.
+// Requeue 补偿房间创建失败，将成员放回原 scope/mode 队列。
+// LREM 后再 RPUSH 保证重试不会让同一成员在等待队列中出现多次。
 func (p *CrossPool) Requeue(ctx context.Context, scope string, mode int32, entries []QueueEntry) error {
 	if p.rdb == nil {
 		return fmt.Errorf("redis required for match compensation")
@@ -107,11 +111,12 @@ func ParseMember(raw string) (QueueEntry, error) {
 	return QueueEntry{ZoneID: int32(zoneID), RoleID: roleID, Raw: raw}, nil
 }
 
-// Join 玩家加入跨服匹配队列。
+// Join 将玩家加入指定 scope 和模式的共享匹配队列。
 //
 // 参数:
 //   - ctx: Redis 脚本执行上下文
-//   - mode: 匹配模式 ID，决定队列键 ng:match:pool:{mode}
+//   - scope: 匹配范围；global 表示跨区，zone:N 表示仅区服 N
+//   - mode: 匹配模式 ID；与 scope 一起决定唯一队列
 //   - zoneID: 玩家区服
 //   - roleID: 玩家角色 ID
 //   - need: 匹配成功所需人数，通常为 2
@@ -144,10 +149,11 @@ func (p *CrossPool) Join(
 	return out, nil
 }
 
-// QueueSize 查询指定模式队列中等待人数。
+// QueueSize 查询指定 scope 和模式队列中的等待人数。
 //
 // 参数:
 //   - ctx: Redis 上下文
+//   - scope: global 或 zone:N
 //   - mode: 匹配模式 ID
 func (p *CrossPool) QueueSize(ctx context.Context, scope string, mode int32) (int64, error) {
 	if p.rdb == nil {

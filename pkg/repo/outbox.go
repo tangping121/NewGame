@@ -12,16 +12,18 @@ import (
 // OutboxEvent is committed beside an aggregate snapshot and later published
 // to JetStream by a retrying worker.
 type OutboxEvent struct {
-	ID               int64
-	PoolIndex        int
-	EventID          string
-	Subject          string
-	AggregateID      string
-	AggregateVersion int64
-	Payload          json.RawMessage
+	ID               int64           // event_outbox 数据库行 ID
+	PoolIndex        int             // 所在物理分库索引，用于发布后回写正确分库
+	EventID          string          // 全局稳定幂等键，同时作为 JetStream Msg-Id
+	Subject          string          // JetStream 目标主题
+	AggregateID      string          // 产生事件的聚合根 ID
+	AggregateVersion int64           // 事件对应的聚合版本，供消费者拒绝旧投影
+	Payload          json.RawMessage // 业务载荷，不包含通用事件信封
 }
 
-// SaveWithOutbox atomically advances a role snapshot and inserts an event.
+// SaveWithOutbox 在同一数据库事务中推进角色快照并写入事件。
+// 角色 fencing/CAS 失败或 Outbox 插入失败都会回滚整个事务，避免出现
+// “状态已改变但事件丢失”或“事件已发布但状态未提交”。
 func (r *RoleRepo) SaveWithOutbox(
 	ctx context.Context, roleID int64, snap RoleSnapshot, event OutboxEvent,
 ) (int64, error) {
@@ -117,6 +119,8 @@ func (r *RoleRepo) ReserveOutbox(ctx context.Context, limit int) ([]OutboxEvent,
 	return events, nil
 }
 
+// MarkOutboxPublished 在事件获得 JetStream 持久化确认后标记发送完成。
+// poolIndex 必须沿用 ReserveOutbox 返回的物理分库索引，不能按角色重新计算。
 func (r *RoleRepo) MarkOutboxPublished(ctx context.Context, poolIndex int, id int64) error {
 	if poolIndex < 0 || poolIndex >= len(r.pools) {
 		return fmt.Errorf("invalid outbox pool index")
