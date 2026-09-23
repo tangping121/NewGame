@@ -3,7 +3,7 @@ package grant_test
 import (
 	"testing"
 
-	"newgame/pkg/grant"
+	"bastion/pkg/grant"
 )
 
 func TestParse(t *testing.T) {

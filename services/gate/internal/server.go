@@ -16,21 +16,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"newgame/api/pb"
-	"newgame/pkg/app"
-	"newgame/pkg/client"
-	"newgame/pkg/config"
-	"newgame/pkg/discovery"
-	"newgame/pkg/errors"
-	"newgame/pkg/gateforward"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/internaltls"
-	"newgame/pkg/log"
-	"newgame/pkg/presence"
-	"newgame/pkg/protocol"
-	redisx "newgame/pkg/redis"
-	"newgame/pkg/session"
-	"newgame/pkg/shard"
+	"bastion/api/pb"
+	"bastion/pkg/app"
+	"bastion/pkg/client"
+	"bastion/pkg/config"
+	"bastion/pkg/discovery"
+	"bastion/pkg/errors"
+	"bastion/pkg/gateforward"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/internaltls"
+	"bastion/pkg/log"
+	"bastion/pkg/presence"
+	"bastion/pkg/protocol"
+	redisx "bastion/pkg/redis"
+	"bastion/pkg/session"
+	"bastion/pkg/shard"
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -142,7 +142,7 @@ func New(cfgPath string) (*Server, error) {
 		redis:     rdb,
 		disc:      reg,
 		resolver:  discovery.NewResolver(reg, 2*time.Second),
-		gameCli:   client.NewGameClientSharded(reg, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
+		gameCli:   client.BastionClientSharded(reg, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 		limiter:   newConnLimiter(cfg.MaxConnPerIP),
 		forward:   fwd,
 		transport: transport,

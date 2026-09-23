@@ -9,13 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"newgame/pkg/actor"
-	"newgame/pkg/grant"
-	"newgame/pkg/protocol"
-	"newgame/pkg/repo"
-	"newgame/services/game/internal/bag"
-	"newgame/services/game/internal/quest"
-	"newgame/services/game/internal/skill"
+	"bastion/pkg/actor"
+	"bastion/pkg/grant"
+	"bastion/pkg/protocol"
+	"bastion/pkg/repo"
+	"bastion/services/game/internal/bag"
+	"bastion/services/game/internal/quest"
+	"bastion/services/game/internal/skill"
 )
 
 var (

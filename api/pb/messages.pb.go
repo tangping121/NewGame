@@ -867,7 +867,7 @@ var File_messages_proto protoreflect.FileDescriptor
 
 const file_messages_proto_rawDesc = "" +
 	"\n" +
-	"\x0emessages.proto\x12\vnewgame.api\"`\n" +
+	"\x0emessages.proto\x12\vbastion.api\"`\n" +
 	"\fLoginRequest\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x18\n" +
@@ -927,7 +927,7 @@ const file_messages_proto_rawDesc = "" +
 	"\x13GameForwardResponse\x12\x12\n" +
 	"\x04body\x18\x01 \x01(\fR\x04body2]\n" +
 	"\rGameForwarder\x12L\n" +
-	"\aForward\x12\x1f.newgame.api.GameForwardRequest\x1a .newgame.api.GameForwardResponseB\x10Z\x0enewgame/api/pbb\x06proto3"
+	"\aForward\x12\x1f.bastion.api.GameForwardRequest\x1a .bastion.api.GameForwardResponseB\x10Z\x0ebastion/api/pbb\x06proto3"
 
 var (
 	file_messages_proto_rawDescOnce sync.Once
@@ -943,24 +943,24 @@ func file_messages_proto_rawDescGZIP() []byte {
 
 var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_messages_proto_goTypes = []any{
-	(*LoginRequest)(nil),             // 0: newgame.api.LoginRequest
-	(*LoginResponse)(nil),            // 1: newgame.api.LoginResponse
-	(*EnterGateRequest)(nil),         // 2: newgame.api.EnterGateRequest
-	(*MatchRequest)(nil),             // 3: newgame.api.MatchRequest
-	(*MatchResponse)(nil),            // 4: newgame.api.MatchResponse
-	(*BattleRoomCreateRequest)(nil),  // 5: newgame.api.BattleRoomCreateRequest
-	(*BattleRoomCreateResponse)(nil), // 6: newgame.api.BattleRoomCreateResponse
-	(*BattleResultRequest)(nil),      // 7: newgame.api.BattleResultRequest
-	(*BattleResultResponse)(nil),     // 8: newgame.api.BattleResultResponse
-	(*RankUpdateRequest)(nil),        // 9: newgame.api.RankUpdateRequest
-	(*MailSendRequest)(nil),          // 10: newgame.api.MailSendRequest
-	(*PayNotifyRequest)(nil),         // 11: newgame.api.PayNotifyRequest
-	(*GameForwardRequest)(nil),       // 12: newgame.api.GameForwardRequest
-	(*GameForwardResponse)(nil),      // 13: newgame.api.GameForwardResponse
+	(*LoginRequest)(nil),             // 0: bastion.api.LoginRequest
+	(*LoginResponse)(nil),            // 1: bastion.api.LoginResponse
+	(*EnterGateRequest)(nil),         // 2: bastion.api.EnterGateRequest
+	(*MatchRequest)(nil),             // 3: bastion.api.MatchRequest
+	(*MatchResponse)(nil),            // 4: bastion.api.MatchResponse
+	(*BattleRoomCreateRequest)(nil),  // 5: bastion.api.BattleRoomCreateRequest
+	(*BattleRoomCreateResponse)(nil), // 6: bastion.api.BattleRoomCreateResponse
+	(*BattleResultRequest)(nil),      // 7: bastion.api.BattleResultRequest
+	(*BattleResultResponse)(nil),     // 8: bastion.api.BattleResultResponse
+	(*RankUpdateRequest)(nil),        // 9: bastion.api.RankUpdateRequest
+	(*MailSendRequest)(nil),          // 10: bastion.api.MailSendRequest
+	(*PayNotifyRequest)(nil),         // 11: bastion.api.PayNotifyRequest
+	(*GameForwardRequest)(nil),       // 12: bastion.api.GameForwardRequest
+	(*GameForwardResponse)(nil),      // 13: bastion.api.GameForwardResponse
 }
 var file_messages_proto_depIdxs = []int32{
-	12, // 0: newgame.api.GameForwarder.Forward:input_type -> newgame.api.GameForwardRequest
-	13, // 1: newgame.api.GameForwarder.Forward:output_type -> newgame.api.GameForwardResponse
+	12, // 0: bastion.api.GameForwarder.Forward:input_type -> bastion.api.GameForwardRequest
+	13, // 1: bastion.api.GameForwarder.Forward:output_type -> bastion.api.GameForwardResponse
 	1,  // [1:2] is the sub-list for method output_type
 	0,  // [0:1] is the sub-list for method input_type
 	0,  // [0:0] is the sub-list for extension type_name

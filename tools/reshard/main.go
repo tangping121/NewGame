@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"newgame/pkg/db"
-	"newgame/pkg/shard"
+	"bastion/pkg/db"
+	"bastion/pkg/shard"
 )
 
 func main() {

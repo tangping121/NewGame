@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"newgame/services/game/internal/guild"
+	"bastion/services/game/internal/guild"
 )
 
 func TestJoinGuild(t *testing.T) {

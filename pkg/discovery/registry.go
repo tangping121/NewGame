@@ -15,7 +15,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	"newgame/pkg/zone"
+	"bastion/pkg/zone"
 )
 
 const keyPrefix = "ng:disc:"

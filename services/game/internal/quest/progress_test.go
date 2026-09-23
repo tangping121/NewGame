@@ -3,7 +3,7 @@ package quest_test
 import (
 	"testing"
 
-	"newgame/services/game/internal/quest"
+	"bastion/services/game/internal/quest"
 )
 
 func TestQuestFlow(t *testing.T) {

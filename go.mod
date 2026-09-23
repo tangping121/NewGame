@@ -1,4 +1,4 @@
-module newgame
+module bastion
 
 go 1.25
 

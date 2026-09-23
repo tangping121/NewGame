@@ -3,8 +3,8 @@ package main
 import (
 	"log"
 
-	"newgame/pkg/app"
-	srv "newgame/services/login/internal"
+	"bastion/pkg/app"
+	srv "bastion/services/login/internal"
 )
 
 func main() {

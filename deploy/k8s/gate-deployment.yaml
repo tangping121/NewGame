@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gate
-  namespace: newgame
+  namespace: bastion
 spec:
   replicas: 10                       # 10 万 CCU（~1.5 万连接/节点）；100 万时 67~100
   strategy:
@@ -23,8 +23,8 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gate
-          image: newgame/gate:0.2.0
-          args: ["-config", "/etc/newgame/gate.yaml"]
+          image: bastion/gate:0.2.0
+          args: ["-config", "/etc/bastion/gate.yaml"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -47,7 +47,7 @@ spec:
             - name: NG_INTERNAL_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: newgame-secrets
+                  name: bastion-secrets
                   key: internal-secret
             - name: NG_SHARD_COUNT
               value: "50"
@@ -59,7 +59,7 @@ spec:
             - name: NG_ADVERTISE_TCP_ADDR
               valueFrom:
                 configMapKeyRef:
-                  name: newgame-public-addresses
+                  name: bastion-public-addresses
                   key: gate_tcp
             - name: NG_ZONE_ID
               value: "1"
@@ -69,10 +69,10 @@ spec:
               value: "nats://nats:4222"
           volumeMounts:
             - name: cfg
-              mountPath: /etc/newgame
+              mountPath: /etc/bastion
               readOnly: true
             - name: internal-tls
-              mountPath: /etc/newgame/tls
+              mountPath: /etc/bastion/tls
               readOnly: true
           readinessProbe:
             httpGet: { path: /readyz, port: http }
@@ -91,13 +91,13 @@ spec:
             name: gate-config
         - name: internal-tls
           secret:
-            secretName: newgame-internal-tls
+            secretName: bastion-internal-tls
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: gate-lb
-  namespace: newgame
+  namespace: bastion
 spec:
   type: LoadBalancer
   externalTrafficPolicy: Local       # 保留客户端 IP，利于连接粘滞

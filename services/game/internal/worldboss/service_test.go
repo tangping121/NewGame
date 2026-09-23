@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"newgame/services/game/internal/worldboss"
+	"bastion/services/game/internal/worldboss"
 )
 
 func TestAttackWithoutRedis(t *testing.T) {

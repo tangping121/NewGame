@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: login
-  namespace: newgame
+  namespace: bastion
 spec:
   replicas: 3
   strategy:
@@ -23,8 +23,8 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: login
-          image: newgame/login:0.2.0
-          args: ["-config", "/etc/newgame/login.yaml"]
+          image: bastion/login:0.2.0
+          args: ["-config", "/etc/bastion/login.yaml"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -42,7 +42,7 @@ spec:
             - name: NG_INTERNAL_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: newgame-secrets
+                  name: bastion-secrets
                   key: internal-secret
             - name: NG_HTTP_ADDR
               value: ":8080"
@@ -53,18 +53,18 @@ spec:
             - name: NG_POSTGRES
               valueFrom:
                 secretKeyRef:
-                  name: newgame-secrets
+                  name: bastion-secrets
                   key: postgres-central
             - name: NG_POSTGRES_SHARDS
               valueFrom:
                 secretKeyRef:
-                  name: newgame-secrets
+                  name: bastion-secrets
                   key: postgres-shards
             - name: NG_SHARD_COUNT
               value: "50"
           volumeMounts:
             - name: cfg
-              mountPath: /etc/newgame
+              mountPath: /etc/bastion
               readOnly: true
           readinessProbe:
             httpGet: { path: /readyz, port: http }
@@ -86,7 +86,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: login
-  namespace: newgame
+  namespace: bastion
 spec:
   selector:
     app: login

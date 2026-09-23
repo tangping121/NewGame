@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"newgame/api/pb"
+	"bastion/api/pb"
 
 	"go.uber.org/zap"
 )

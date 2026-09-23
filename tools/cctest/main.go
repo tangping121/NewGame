@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"newgame/api/pb"
-	"newgame/pkg/protocol"
+	"bastion/api/pb"
+	"bastion/pkg/protocol"
 )
 
 func main() {

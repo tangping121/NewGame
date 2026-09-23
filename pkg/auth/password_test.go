@@ -3,7 +3,7 @@ package auth_test
 import (
 	"testing"
 
-	"newgame/pkg/auth"
+	"bastion/pkg/auth"
 )
 
 func TestPasswordHash(t *testing.T) {

@@ -15,16 +15,16 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: newgame
-      POSTGRES_PASSWORD: newgame
-      POSTGRES_DB: newgame
+      POSTGRES_USER: bastion
+      POSTGRES_PASSWORD: bastion
+      POSTGRES_DB: bastion
     ports:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./deploy/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U newgame -d newgame"]
+      test: ["CMD-SHELL", "pg_isready -U bastion -d bastion"]
       interval: 3s
       timeout: 3s
       retries: 30
@@ -43,7 +43,7 @@ services:
       context: .
       dockerfile: Dockerfile.migrate
     environment:
-      NG_POSTGRES: "postgres://newgame:newgame@postgres:5432/newgame?sslmode=disable"
+      NG_POSTGRES: "postgres://bastion:bastion@postgres:5432/bastion?sslmode=disable"
     depends_on:
       postgres:
         condition: service_healthy

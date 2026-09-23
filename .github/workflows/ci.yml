@@ -87,7 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build service image
-        run: docker build --build-arg SERVICE=${{ matrix.service }} -t newgame/${{ matrix.service }}:ci .
+        run: docker build --build-arg SERVICE=${{ matrix.service }} -t bastion/${{ matrix.service }}:ci .
       - name: Build migration image
         if: matrix.service == 'login'
-        run: docker build -f Dockerfile.migrate -t newgame/migrate:ci .
+        run: docker build -f Dockerfile.migrate -t bastion/migrate:ci .

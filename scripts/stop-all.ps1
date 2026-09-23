@@ -1,4 +1,4 @@
-# 停止 NewGame 各服务（按监听端口）
+# 停止 Bastion 各服务（按监听端口）
 $ErrorActionPreference = "SilentlyContinue"
 
 $ports = @(

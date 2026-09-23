@@ -1,6 +1,6 @@
 package quest
 
-import "newgame/pkg/repo"
+import "bastion/pkg/repo"
 
 const (
 	StatusNone     int32 = 0

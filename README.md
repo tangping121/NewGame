@@ -1,4 +1,4 @@
-# NewGame 游戏服务端
+# Bastion 游戏服务端
 
 多进程微服务架构的游戏服务端脚手架，包含 11 个业务进程与 4 个基础设施服务。
 
@@ -46,7 +46,7 @@ Client
 ## 目录结构
 
 ```
-D:\NewGame
+.
 ├── api/pb/           # protoc 生成（messages.pb.go）+ 运行 make proto 更新
 ├── api/proto/        # proto 源文件
 ├── configs/          # 各服务 YAML 配置
@@ -65,7 +65,7 @@ D:\NewGame
 ### 1. 启动基础设施
 
 ```powershell
-cd D:\NewGame
+# 在仓库根目录执行
 docker compose up -d
 # migrate 容器会在 PostgreSQL 健康后执行全部版本迁移
 ```
@@ -73,7 +73,7 @@ docker compose up -d
 | 服务 | 端口 |
 |------|------|
 | Redis | 6379 |
-| PostgreSQL | 5432 (user/pass/db: newgame) |
+| PostgreSQL | 5432 (user/pass/db: bastion) |
 | NATS | 4222 |
 
 ### 2. 安装依赖并编译

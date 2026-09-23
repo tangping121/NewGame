@@ -13,17 +13,17 @@ import (
 	"sync"
 	"time"
 
-	"newgame/pkg/app"
-	"newgame/pkg/client"
-	"newgame/pkg/config"
-	"newgame/pkg/db"
-	"newgame/pkg/discovery"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/log"
-	"newgame/pkg/payment"
-	redisx "newgame/pkg/redis"
-	"newgame/pkg/repo"
-	"newgame/pkg/session"
+	"bastion/pkg/app"
+	"bastion/pkg/client"
+	"bastion/pkg/config"
+	"bastion/pkg/db"
+	"bastion/pkg/discovery"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/log"
+	"bastion/pkg/payment"
+	redisx "bastion/pkg/redis"
+	"bastion/pkg/repo"
+	"bastion/pkg/session"
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -65,7 +65,7 @@ func New(cfgPath string) (*Server, error) {
 		cfg:   cfg,
 		log:   logger,
 		redis: rdb,
-		game:  client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
+		game:  client.BastionClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

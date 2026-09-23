@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"newgame/pkg/auth"
-	"newgame/pkg/shard"
+	"bastion/pkg/auth"
+	"bastion/pkg/shard"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

@@ -13,7 +13,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.uber.org/zap"
 
-	"newgame/pkg/config"
+	"bastion/pkg/config"
 )
 
 var tracingEnabled bool

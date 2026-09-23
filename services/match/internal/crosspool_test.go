@@ -3,7 +3,7 @@ package internal_test
 import (
 	"testing"
 
-	"newgame/services/match/internal"
+	"bastion/services/match/internal"
 )
 
 func TestParseMember(t *testing.T) {

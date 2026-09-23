@@ -3,9 +3,9 @@ package player_test
 import (
 	"testing"
 
-	"newgame/pkg/protocol"
-	"newgame/pkg/repo"
-	"newgame/services/game/internal/player"
+	"bastion/pkg/protocol"
+	"bastion/pkg/repo"
+	"bastion/services/game/internal/player"
 )
 
 func TestMutatingAct(t *testing.T) {

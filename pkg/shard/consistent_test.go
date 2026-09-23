@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"newgame/pkg/shard"
+	"bastion/pkg/shard"
 )
 
 func TestRingStableMapping(t *testing.T) {

@@ -10,14 +10,14 @@ import (
 	"strconv"
 	"time"
 
-	"newgame/pkg/app"
-	"newgame/pkg/config"
-	"newgame/pkg/discovery"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/log"
-	redisx "newgame/pkg/redis"
-	"newgame/pkg/shard"
-	"newgame/pkg/zone"
+	"bastion/pkg/app"
+	"bastion/pkg/config"
+	"bastion/pkg/discovery"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/log"
+	redisx "bastion/pkg/redis"
+	"bastion/pkg/shard"
+	"bastion/pkg/zone"
 
 	"go.uber.org/zap"
 )

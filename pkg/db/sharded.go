@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"newgame/pkg/shard"
+	"bastion/pkg/shard"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )

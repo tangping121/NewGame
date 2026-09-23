@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"newgame/pkg/internalauth"
-	"newgame/pkg/protocol"
-	"newgame/pkg/scale"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/protocol"
+	"bastion/pkg/scale"
 )
 
 // HTTPPool 复用 TCP 连接转发至 Game /internal/player/msg。

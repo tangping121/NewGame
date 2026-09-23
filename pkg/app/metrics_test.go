@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"newgame/pkg/app"
+	"bastion/pkg/app"
 )
 
 func TestWithMetrics(t *testing.T) {

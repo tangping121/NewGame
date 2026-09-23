@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"newgame/pkg/redis"
+	"bastion/pkg/redis"
 
 	goredis "github.com/redis/go-redis/v9"
 )

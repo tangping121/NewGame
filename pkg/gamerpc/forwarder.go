@@ -3,7 +3,7 @@
 package gamerpc
 
 import (
-	"newgame/api/pb"
+	"bastion/api/pb"
 
 	"google.golang.org/grpc"
 )
@@ -20,5 +20,5 @@ func RegisterForwarderServer(s grpc.ServiceRegistrar, impl ForwarderServer) {
 }
 
 func NewForwarderClient(cc grpc.ClientConnInterface) ForwarderClient {
-	return pb.NewGameForwarderClient(cc)
+	return pb.BastionForwarderClient(cc)
 }

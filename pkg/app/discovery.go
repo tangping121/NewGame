@@ -6,9 +6,9 @@ import (
 	"syscall"
 	"time"
 
-	"newgame/pkg/config"
-	"newgame/pkg/discovery"
-	redisx "newgame/pkg/redis"
+	"bastion/pkg/config"
+	"bastion/pkg/discovery"
+	redisx "bastion/pkg/redis"
 
 	"go.uber.org/zap"
 )

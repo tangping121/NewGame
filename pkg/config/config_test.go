@@ -77,7 +77,7 @@ func TestProductionGRPCRequiresMutualTLS(t *testing.T) {
 		InternalSecret: "secret",
 		Infra: Infra{
 			Redis:    "redis:6379",
-			Postgres: "postgres://db/newgame",
+			Postgres: "postgres://db/bastion",
 		},
 	}
 	if err := service.Validate(); err == nil {

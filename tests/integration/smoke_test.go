@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"newgame/api/pb"
-	"newgame/pkg/protocol"
+	"bastion/api/pb"
+	"bastion/pkg/protocol"
 )
 
 func env(k, def string) string {

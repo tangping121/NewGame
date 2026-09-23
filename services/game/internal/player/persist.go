@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	actorpkg "newgame/pkg/actor"
-	"newgame/pkg/repo"
+	actorpkg "bastion/pkg/actor"
+	"bastion/pkg/repo"
 )
 
 // PersistConfig 玩家状态持久化策略（P2：异步落库支撑 10 万 CCU）。

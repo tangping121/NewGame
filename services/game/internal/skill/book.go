@@ -1,6 +1,6 @@
 package skill
 
-import "newgame/pkg/repo"
+import "bastion/pkg/repo"
 
 // Book 玩家技能等级表，skill_id -> level。
 type Book map[string]int32

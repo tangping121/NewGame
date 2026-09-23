@@ -3,7 +3,7 @@ package shard_test
 import (
 	"testing"
 
-	"newgame/pkg/shard"
+	"bastion/pkg/shard"
 )
 
 func TestForRole(t *testing.T) {

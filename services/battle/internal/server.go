@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"newgame/api/pb"
-	"newgame/pkg/app"
-	"newgame/pkg/config"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/log"
-	redisx "newgame/pkg/redis"
+	"bastion/api/pb"
+	"bastion/pkg/app"
+	"bastion/pkg/config"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/log"
+	redisx "bastion/pkg/redis"
 
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"

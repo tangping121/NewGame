@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"newgame/pkg/actor"
+	"bastion/pkg/actor"
 )
 
 func TestMailboxCallSerial(t *testing.T) {

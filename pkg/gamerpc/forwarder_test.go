@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"newgame/pkg/gamerpc"
+	"bastion/pkg/gamerpc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

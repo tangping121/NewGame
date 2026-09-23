@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"newgame/pkg/config"
+	"bastion/pkg/config"
 
 	"gopkg.in/yaml.v3"
 )

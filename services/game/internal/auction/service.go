@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"sync"
 
-	"newgame/pkg/grant"
-	"newgame/pkg/repo"
-	"newgame/services/game/internal/player"
+	"bastion/pkg/grant"
+	"bastion/pkg/repo"
+	"bastion/services/game/internal/player"
 )
 
 // Listing 对外展示的拍卖条目（在售）。

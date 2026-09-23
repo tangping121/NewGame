@@ -4,8 +4,8 @@ package grant
 import (
 	"context"
 
-	"newgame/pkg/grant"
-	"newgame/services/game/internal/player"
+	"bastion/pkg/grant"
+	"bastion/services/game/internal/player"
 )
 
 type Service struct{}

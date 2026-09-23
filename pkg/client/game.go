@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"time"
 
-	"newgame/pkg/discovery"
-	"newgame/pkg/grant"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/shard"
+	"bastion/pkg/discovery"
+	"bastion/pkg/grant"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/shard"
 )
 
 // GameClient 调用 Game 服务 /internal/* 接口的 HTTP 客户端。
@@ -29,22 +29,22 @@ type GameClient struct {
 	http       *http.Client        // HTTP 客户端，超时 5 秒
 }
 
-// NewGameClient 创建 Game 内部 API 客户端（单进程模式）。
+// BastionClient 创建 Game 内部 API 客户端（单进程模式）。
 //
 // 参数:
 //   - disc: Redis 服务发现注册表；可为 nil
 //   - zoneID: 角色所在区服 ID
-func NewGameClient(disc *discovery.Registry, zoneID int32) *GameClient {
-	return NewGameClientSharded(disc, zoneID, 0)
+func BastionClient(disc *discovery.Registry, zoneID int32) *GameClient {
+	return BastionClientSharded(disc, zoneID, 0)
 }
 
-// NewGameClientSharded 创建支持分片路由的 Game 内部 API 客户端。
+// BastionClientSharded 创建支持分片路由的 Game 内部 API 客户端。
 //
 // 参数:
 //   - disc: Redis 服务发现注册表；可为 nil
 //   - zoneID: 角色所在区服 ID
 //   - shardCount: Game 分片总数；<=0 时退化为单进程 "game"
-func NewGameClientSharded(disc *discovery.Registry, zoneID int32, shardCount int32) *GameClient {
+func BastionClientSharded(disc *discovery.Registry, zoneID int32, shardCount int32) *GameClient {
 	var resolver *discovery.Resolver
 	if disc != nil {
 		resolver = discovery.NewResolver(disc, 2*time.Second)

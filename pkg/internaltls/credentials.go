@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"newgame/pkg/config"
+	"bastion/pkg/config"
 
 	"google.golang.org/grpc/credentials"
 )

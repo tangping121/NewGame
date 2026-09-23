@@ -31,10 +31,10 @@ migrate:
 	go run ./tools/migrate -dir ./deploy
 
 docker-critical:
-	docker build --build-arg SERVICE=login -t newgame/login:dev .
-	docker build --build-arg SERVICE=gate -t newgame/gate:dev .
-	docker build --build-arg SERVICE=game -t newgame/game:dev .
-	docker build -f Dockerfile.migrate -t newgame/migrate:dev .
+	docker build --build-arg SERVICE=login -t bastion/login:dev .
+	docker build --build-arg SERVICE=gate -t bastion/gate:dev .
+	docker build --build-arg SERVICE=game -t bastion/game:dev .
+	docker build -f Dockerfile.migrate -t bastion/migrate:dev .
 
 build:
 	go build -o bin/login.exe ./services/login/cmd

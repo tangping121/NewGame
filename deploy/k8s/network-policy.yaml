@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: game-internal-ingress
-  namespace: newgame
+  namespace: bastion
 spec:
   podSelector:
     matchLabels:
@@ -12,7 +12,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: newgame
+              kubernetes.io/metadata.name: bastion
       ports:
         - { protocol: TCP, port: 9100 }
         - { protocol: TCP, port: 9150 }
@@ -21,7 +21,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: gate-public-ingress
-  namespace: newgame
+  namespace: bastion
 spec:
   podSelector:
     matchLabels:
@@ -33,7 +33,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: newgame
+              kubernetes.io/metadata.name: bastion
       ports:
         - { protocol: TCP, port: 9001 }
 ---
@@ -41,7 +41,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: login-public-ingress
-  namespace: newgame
+  namespace: bastion
 spec:
   podSelector:
     matchLabels:

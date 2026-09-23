@@ -6,9 +6,9 @@ import (
 	"math"
 	"net"
 
-	"newgame/pkg/gamerpc"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/internaltls"
+	"bastion/pkg/gamerpc"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/internaltls"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"

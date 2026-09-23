@@ -1,15 +1,15 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: newgame-schema-migrate
-  namespace: newgame
+  name: bastion-schema-migrate
+  namespace: bastion
 spec:
   backoffLimit: 4
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:
-        app: newgame-schema-migrate
+        app: bastion-schema-migrate
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
@@ -18,7 +18,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: migrate
-          image: newgame/migrate:0.2.0
+          image: bastion/migrate:0.2.0
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -28,12 +28,12 @@ spec:
             - name: NG_POSTGRES
               valueFrom:
                 secretKeyRef:
-                  name: newgame-secrets
+                  name: bastion-secrets
                   key: postgres-central
             - name: NG_POSTGRES_SHARDS
               valueFrom:
                 secretKeyRef:
-                  name: newgame-secrets
+                  name: bastion-secrets
                   key: postgres-shards
             - name: NG_SHARD_COUNT
               value: "50"

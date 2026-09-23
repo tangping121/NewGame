@@ -1,6 +1,6 @@
 # 客户端对接文档
 
-本文档说明游戏客户端如何与 NewGame 服务端对接：**HTTP 登录** → **TCP 长连接 Gate** → **Cmd/Act 帧协议** 玩游戏逻辑。
+本文档说明游戏客户端如何与 Bastion 服务端对接：**HTTP 登录** → **TCP 长连接 Gate** → **Cmd/Act 帧协议** 玩游戏逻辑。
 
 代码定义见 `pkg/protocol/`（帧格式与 JSON 载荷）、`api/proto/messages.proto`（HTTP 消息体）。
 

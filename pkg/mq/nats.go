@@ -9,7 +9,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"newgame/pkg/protocol"
+	"bastion/pkg/protocol"
 )
 
 // Connect 连接 NATS 服务器。
@@ -19,7 +19,7 @@ import (
 func Connect(url string) (*nats.Conn, error) {
 	return nats.Connect(
 		url,
-		nats.Name("newgame"),
+		nats.Name("bastion"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
 		nats.Timeout(5*time.Second),

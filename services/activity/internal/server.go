@@ -10,16 +10,16 @@ import (
 	"sync"
 	"time"
 
-	"newgame/pkg/app"
-	"newgame/pkg/client"
-	"newgame/pkg/config"
-	"newgame/pkg/db"
-	"newgame/pkg/discovery"
-	"newgame/pkg/log"
-	"newgame/pkg/mq"
-	redisx "newgame/pkg/redis"
-	"newgame/pkg/repo"
-	"newgame/pkg/session"
+	"bastion/pkg/app"
+	"bastion/pkg/client"
+	"bastion/pkg/config"
+	"bastion/pkg/db"
+	"bastion/pkg/discovery"
+	"bastion/pkg/log"
+	"bastion/pkg/mq"
+	redisx "bastion/pkg/redis"
+	"bastion/pkg/repo"
+	"bastion/pkg/session"
 
 	"github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
@@ -52,7 +52,7 @@ func New(cfgPath string) (*Server, error) {
 	disc := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
 	s := &Server{
 		cfg: cfg, log: logger, redis: rdb,
-		game:     client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
+		game:     client.BastionClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 		progress: map[int64]map[int32]repo.ActivityState{},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

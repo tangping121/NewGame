@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"newgame/services/game/internal/player"
+	"bastion/services/game/internal/player"
 )
 
 // TestGetConcurrentSingleActor 并发首次 Get 同一 roleID 应只产生一个 Actor 实例。

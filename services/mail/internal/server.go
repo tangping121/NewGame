@@ -10,19 +10,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"newgame/api/pb"
-	"newgame/pkg/app"
-	"newgame/pkg/client"
-	"newgame/pkg/config"
-	"newgame/pkg/db"
-	"newgame/pkg/discovery"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/log"
-	"newgame/pkg/mq"
-	"newgame/pkg/protocol"
-	redisx "newgame/pkg/redis"
-	"newgame/pkg/repo"
-	"newgame/pkg/session"
+	"bastion/api/pb"
+	"bastion/pkg/app"
+	"bastion/pkg/client"
+	"bastion/pkg/config"
+	"bastion/pkg/db"
+	"bastion/pkg/discovery"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/log"
+	"bastion/pkg/mq"
+	"bastion/pkg/protocol"
+	redisx "bastion/pkg/redis"
+	"bastion/pkg/repo"
+	"bastion/pkg/session"
 
 	"github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
@@ -56,7 +56,7 @@ func New(cfgPath string) (*Server, error) {
 		log:    logger,
 		redis:  rdb,
 		disc:   disc,
-		game:   client.NewGameClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
+		game:   client.BastionClientSharded(disc, cfg.ZoneID, cfg.Scale.ShardCount).WithSecret(cfg.InternalSecret).WithStrict(cfg.Production()),
 		notify: client.NewNotifyClient(rdb).WithSecret(cfg.InternalSecret),
 		mem:    map[int64][]repo.Mail{},
 	}

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"newgame/pkg/db"
+	"bastion/pkg/db"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

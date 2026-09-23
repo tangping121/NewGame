@@ -5,8 +5,8 @@ import (
 	"net"
 	"os"
 
-	"newgame/pkg/config"
-	"newgame/pkg/shard"
+	"bastion/pkg/config"
+	"bastion/pkg/shard"
 )
 
 // Instance 注册到 Redis 的服务实例，包含可被其他服务调用的地址信息。

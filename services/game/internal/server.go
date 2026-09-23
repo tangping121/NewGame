@@ -10,25 +10,25 @@ import (
 	"strconv"
 	"time"
 
-	"newgame/api/pb"
-	"newgame/pkg/app"
-	"newgame/pkg/client"
-	"newgame/pkg/config"
-	"newgame/pkg/db"
-	"newgame/pkg/discovery"
-	"newgame/pkg/grant"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/log"
-	"newgame/pkg/mq"
-	"newgame/pkg/protocol"
-	redisx "newgame/pkg/redis"
-	"newgame/pkg/repo"
-	"newgame/services/game/internal/auction"
-	"newgame/services/game/internal/dungeon"
-	"newgame/services/game/internal/guild"
-	"newgame/services/game/internal/guildwar"
-	"newgame/services/game/internal/player"
-	"newgame/services/game/internal/worldboss"
+	"bastion/api/pb"
+	"bastion/pkg/app"
+	"bastion/pkg/client"
+	"bastion/pkg/config"
+	"bastion/pkg/db"
+	"bastion/pkg/discovery"
+	"bastion/pkg/grant"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/log"
+	"bastion/pkg/mq"
+	"bastion/pkg/protocol"
+	redisx "bastion/pkg/redis"
+	"bastion/pkg/repo"
+	"bastion/services/game/internal/auction"
+	"bastion/services/game/internal/dungeon"
+	"bastion/services/game/internal/guild"
+	"bastion/services/game/internal/guildwar"
+	"bastion/services/game/internal/player"
+	"bastion/services/game/internal/worldboss"
 
 	"github.com/nats-io/nats.go"
 	goredis "github.com/redis/go-redis/v9"
@@ -115,7 +115,7 @@ func New(cfgPath string) (*Server, error) {
 		ShardCount:  cfg.Scale.ShardCount,
 	})
 	registry := discovery.NewRegistry(rdb, cfg.Discovery.TTL())
-	gameClient := client.NewGameClientSharded(registry, cfg.ZoneID, cfg.Scale.ShardCount).
+	gameClient := client.BastionClientSharded(registry, cfg.ZoneID, cfg.Scale.ShardCount).
 		WithSecret(cfg.InternalSecret).WithStrict(cfg.Production())
 	return &Server{
 		cfg:       cfg,

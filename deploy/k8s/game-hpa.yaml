@@ -4,7 +4,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: gate-hpa
-  namespace: newgame
+  namespace: bastion
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

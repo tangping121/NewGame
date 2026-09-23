@@ -19,7 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GameForwarder_Forward_FullMethodName = "/newgame.api.GameForwarder/Forward"
+	GameForwarder_Forward_FullMethodName = "/bastion.api.GameForwarder/Forward"
 )
 
 // GameForwarderClient is the client API for GameForwarder service.
@@ -33,7 +33,7 @@ type gameForwarderClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewGameForwarderClient(cc grpc.ClientConnInterface) GameForwarderClient {
+func BastionForwarderClient(cc grpc.ClientConnInterface) GameForwarderClient {
 	return &gameForwarderClient{cc}
 }
 
@@ -106,7 +106,7 @@ func _GameForwarder_Forward_Handler(srv interface{}, ctx context.Context, dec fu
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var GameForwarder_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "newgame.api.GameForwarder",
+	ServiceName: "bastion.api.GameForwarder",
 	HandlerType: (*GameForwarderServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{

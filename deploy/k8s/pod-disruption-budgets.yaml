@@ -2,7 +2,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: login
-  namespace: newgame
+  namespace: bastion
 spec:
   minAvailable: 2
   selector:
@@ -13,7 +13,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: gate
-  namespace: newgame
+  namespace: bastion
 spec:
   maxUnavailable: 1
   selector:
@@ -24,7 +24,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: game-shard
-  namespace: newgame
+  namespace: bastion
 spec:
   maxUnavailable: 1
   selector:

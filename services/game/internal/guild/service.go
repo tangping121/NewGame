@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"newgame/pkg/repo"
+	"bastion/pkg/repo"
 )
 
 // Guild 公会视图（含成员列表）。

@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"newgame/pkg/protocol"
+	"bastion/pkg/protocol"
 )
 
 func TestEncodeDecode(t *testing.T) {

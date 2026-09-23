@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"newgame/services/game/internal/guildwar"
+	"bastion/services/game/internal/guildwar"
 )
 
 func TestAttackMemory(t *testing.T) {

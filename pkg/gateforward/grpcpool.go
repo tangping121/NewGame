@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"newgame/pkg/gamerpc"
-	"newgame/pkg/internalauth"
-	"newgame/pkg/scale"
+	"bastion/pkg/gamerpc"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/scale"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"

@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"newgame/pkg/grant"
-	"newgame/pkg/protocol"
-	"newgame/pkg/repo"
-	"newgame/pkg/shard"
+	"bastion/pkg/grant"
+	"bastion/pkg/protocol"
+	"bastion/pkg/repo"
+	"bastion/pkg/shard"
 )
 
 // idleTimeout 玩家无活动超过此时长后被淘汰（落库 + 关闭邮箱）。

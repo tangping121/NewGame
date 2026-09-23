@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"newgame/services/game/internal/auction"
-	"newgame/services/game/internal/player"
+	"bastion/services/game/internal/auction"
+	"bastion/services/game/internal/player"
 )
 
 func TestAuctionMemory(t *testing.T) {

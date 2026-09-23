@@ -3,7 +3,7 @@ package dungeon
 import (
 	"context"
 
-	"newgame/services/game/internal/player"
+	"bastion/services/game/internal/player"
 
 	"github.com/nats-io/nats.go"
 )

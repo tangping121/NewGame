@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"newgame/pkg/internalauth"
-	"newgame/pkg/presence"
+	"bastion/pkg/internalauth"
+	"bastion/pkg/presence"
 
 	goredis "github.com/redis/go-redis/v9"
 )
