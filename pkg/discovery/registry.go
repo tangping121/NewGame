@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -108,12 +110,21 @@ func (r *Registry) Discover(ctx context.Context, name string, zoneID int32) ([]I
 		return nil, fmt.Errorf("no instances for %s zone %d", name, zoneID)
 	}
 
+	// 一次 pipeline 取回全部实例。Cluster 下按 slot 拆分，避免逐条 GET 的往返，
+	// 也不使用跨 slot 会失败的 MGET。
+	pipe := r.rdb.Pipeline()
+	cmds := make([]*goredis.StringCmd, len(ids))
+	for i, id := range ids {
+		cmds[i] = pipe.Get(ctx, r.instKey(id))
+	}
+	_, _ = pipe.Exec(ctx)
+
 	var out []Instance
 	var stale []string
-	for _, id := range ids {
-		raw, err := r.rdb.Get(ctx, r.instKey(id)).Result()
+	for i, cmd := range cmds {
+		raw, err := cmd.Result()
 		if err == goredis.Nil {
-			stale = append(stale, id)
+			stale = append(stale, ids[i])
 			continue
 		}
 		if err != nil {
@@ -121,7 +132,7 @@ func (r *Registry) Discover(ctx context.Context, name string, zoneID int32) ([]I
 		}
 		var inst Instance
 		if err := json.Unmarshal([]byte(raw), &inst); err != nil {
-			stale = append(stale, id)
+			stale = append(stale, ids[i])
 			continue
 		}
 		out = append(out, inst)
@@ -147,14 +158,9 @@ func (r *Registry) Pick(ctx context.Context, name string, zoneID int32) (Instanc
 		return Instance{}, err
 	}
 	key := fmt.Sprintf("%s:%d", name, zoneID)
-	v, _ := r.picker.LoadOrStore(key, new(uint64))
-	counter := v.(*uint64)
-	n := uint64(len(list))
-	idx := rand.Uint64() % n
-	if n > 1 {
-		idx = (*counter) % n
-		*counter++
-	}
+	v, _ := r.picker.LoadOrStore(key, new(atomic.Uint64))
+	counter := v.(*atomic.Uint64)
+	idx := (counter.Add(1) - 1) % uint64(len(list))
 	return list[idx], nil
 }
 
@@ -172,6 +178,8 @@ func (r *Registry) healthy(ctx context.Context, inst Instance) bool {
 	if err != nil {
 		return false
 	}
+	// 读完响应体才能把连接放回池，否则每次健康检查都重新握手。
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }

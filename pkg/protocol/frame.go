@@ -44,17 +44,26 @@ func Encode(f Frame) []byte {
 
 // EncodeChecked rejects payloads that cannot fit in the uint16 wire length.
 func EncodeChecked(f Frame) ([]byte, error) {
+	return EncodeInto(nil, f)
+}
+
+// EncodeInto 把帧写入 dst 并返回结果切片。cap(dst) 足够时复用其底层数组。
+func EncodeInto(dst []byte, f Frame) ([]byte, error) {
 	// n 为整帧总长（含 2 字节长度前缀）：len(2)+cmd(2)+act(2)+payload。
 	n := HeaderSize + len(f.Body)
 	if n > MaxFrameSize {
 		return nil, ErrFrameTooLarge
 	}
-	buf := make([]byte, n)
-	binary.BigEndian.PutUint16(buf[0:2], uint16(n))
-	binary.BigEndian.PutUint16(buf[2:4], f.Cmd)
-	binary.BigEndian.PutUint16(buf[4:6], f.Act)
-	copy(buf[6:], f.Body)
-	return buf, nil
+	if cap(dst) < n {
+		dst = make([]byte, n)
+	} else {
+		dst = dst[:n]
+	}
+	binary.BigEndian.PutUint16(dst[0:2], uint16(n))
+	binary.BigEndian.PutUint16(dst[2:4], f.Cmd)
+	binary.BigEndian.PutUint16(dst[4:6], f.Act)
+	copy(dst[6:], f.Body)
+	return dst, nil
 }
 
 // Decode 从已去掉外层 len 的帧体解析 Frame。

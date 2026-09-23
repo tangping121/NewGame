@@ -34,6 +34,17 @@ func TestEncodeDecodeEmptyBody(t *testing.T) {
 	}
 }
 
+func TestEncodeIntoReusesBuffer(t *testing.T) {
+	base := make([]byte, 64)
+	out, err := protocol.EncodeInto(base[:0], protocol.Frame{Cmd: 1, Act: 2, Body: []byte("hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != protocol.HeaderSize+2 || &out[0] != &base[0] {
+		t.Fatalf("expected write into the provided buffer, len=%d", len(out))
+	}
+}
+
 func TestEncodeRejectsOversizedFrame(t *testing.T) {
 	_, err := protocol.EncodeChecked(protocol.Frame{
 		Cmd:  protocol.CmdGame,

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -51,7 +52,7 @@ return 1
 `)
 
 func key(roleID int64) string {
-	return keyPrefix + fmt.Sprintf("%d", roleID)
+	return keyPrefix + strconv.FormatInt(roleID, 10)
 }
 
 // Store 登记玩家在线，Gate CmdLogin 成功后调用。

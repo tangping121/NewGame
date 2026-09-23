@@ -39,6 +39,8 @@ func NewHTTPPool(poolSize int) *HTTPPool {
 				MaxIdleConns:        poolSize * 4,
 				MaxIdleConnsPerHost: poolSize,
 				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  true, // 内部短 JSON，跳过 gzip 协商与 CPU
+				ForceAttemptHTTP2:   false,
 			},
 		},
 	}

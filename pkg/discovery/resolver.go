@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // Resolver 在 Registry.PickHealthy 之上加 TTL 缓存，避免热路径每次都做
@@ -16,6 +18,7 @@ type Resolver struct {
 	ttl time.Duration
 	mu  sync.RWMutex
 	m   map[string]*entry
+	sf  singleflight.Group
 }
 
 type entry struct {
@@ -72,26 +75,45 @@ func (r *Resolver) ResolveGlobal(ctx context.Context, name string) (Instance, bo
 }
 
 // resolve 通用缓存刷新逻辑：命中 TTL 直接返回；失败时 stale-on-error。
+// 同一 key 的并发刷新合并为一次，避免 TTL 到期时打穿 Redis 和健康检查。
 func (r *Resolver) resolve(ctx context.Context, key string, pick func() (Instance, error)) (Instance, bool) {
+	if inst, ok := r.cached(key); ok {
+		return inst, true
+	}
+	v, err, _ := r.sf.Do(key, func() (any, error) {
+		if inst, ok := r.cached(key); ok {
+			return inst, nil
+		}
+		inst, pickErr := pick()
+		if pickErr != nil {
+			r.mu.RLock()
+			e := r.m[key]
+			r.mu.RUnlock()
+			if e != nil && e.ok {
+				return e.inst, nil
+			}
+			return nil, pickErr
+		}
+		r.mu.Lock()
+		r.m[key] = &entry{inst: inst, exp: time.Now().Add(r.ttl), ok: true}
+		r.mu.Unlock()
+		return inst, nil
+	})
+	if err != nil {
+		return Instance{}, false
+	}
+	inst, _ := v.(Instance)
+	return inst, true
+}
+
+func (r *Resolver) cached(key string) (Instance, bool) {
 	r.mu.RLock()
 	e := r.m[key]
 	r.mu.RUnlock()
 	if e != nil && e.ok && time.Now().Before(e.exp) {
 		return e.inst, true
 	}
-
-	inst, err := pick()
-	if err != nil {
-		// 刷新失败：回退到上次缓存（即使已过期），提升可用性。
-		if e != nil && e.ok {
-			return e.inst, true
-		}
-		return Instance{}, false
-	}
-	r.mu.Lock()
-	r.m[key] = &entry{inst: inst, exp: time.Now().Add(r.ttl), ok: true}
-	r.mu.Unlock()
-	return inst, true
+	return Instance{}, false
 }
 
 func itoa(v int32) string {

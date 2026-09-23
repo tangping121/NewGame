@@ -4,6 +4,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -16,9 +17,7 @@ type Client = goredis.UniversalClient
 
 // NewClient 创建单机 Redis 客户端。
 func NewClient(addr string) Client {
-	return goredis.NewUniversalClient(&goredis.UniversalOptions{
-		Addrs: []string{addr},
-	})
+	return goredis.NewUniversalClient(options([]string{addr}))
 }
 
 // NewCluster 创建 Redis Cluster 客户端。
@@ -26,9 +25,23 @@ func NewClient(addr string) Client {
 // 参数:
 //   - addrs: 集群任意若干节点地址；go-redis 会自动发现拓扑
 func NewCluster(addrs []string) Client {
-	return goredis.NewUniversalClient(&goredis.UniversalOptions{
-		Addrs: addrs,
-	})
+	return goredis.NewUniversalClient(options(addrs))
+}
+
+// options 放大连接池并保留少量空闲连接，避免登录或心跳突发时现建 TCP。
+func options(addrs []string) *goredis.UniversalOptions {
+	pool := runtime.GOMAXPROCS(0) * 16
+	if pool < 32 {
+		pool = 32
+	}
+	if pool > 128 {
+		pool = 128
+	}
+	return &goredis.UniversalOptions{
+		Addrs:        addrs,
+		PoolSize:     pool,
+		MinIdleConns: 4,
+	}
 }
 
 // New 根据配置选择单机或集群：addrs 非空走 Cluster，否则用单机 addr。

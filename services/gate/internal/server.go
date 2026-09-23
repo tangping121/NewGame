@@ -37,11 +37,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// presenceRenewInterval 限制单连接向 Redis 续约的频率。在线 TTL 为 24h，
+// 踢线由登录时的跨 Gate kick 完成，心跳不必每次都打 Redis。
+const presenceRenewInterval = 30 * time.Second
+
+var pongBody = []byte(`{"pong":true}`)
+
+var frameBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 256)
+		return &b
+	},
+}
+
 type connState struct {
 	roleID    int64
 	zoneID    int32
 	sessionID string
-	authed    bool // 是否已完成 CmdLogin
+	authed    bool      // 是否已完成 CmdLogin
+	nextRenew time.Time // 下次允许续约 presence 的时间
 }
 
 // clientConn 包装一条客户端 TCP 连接，串行化写操作。
@@ -57,12 +71,16 @@ type clientConn struct {
 func (c *clientConn) write(f protocol.Frame) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	buf, err := protocol.EncodeChecked(f)
+	bp := frameBufPool.Get().(*[]byte)
+	buf, err := protocol.EncodeInto(*bp, f)
 	if err != nil {
+		frameBufPool.Put(bp)
 		return err
 	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	_, err = c.conn.Write(buf)
+	*bp = buf[:0]
+	frameBufPool.Put(bp)
 	return err
 }
 
@@ -214,6 +232,14 @@ func (s *Server) acceptLoop(ln net.Listener, wg *sync.WaitGroup) error {
 			_ = conn.Close()
 			continue
 		}
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetKeepAliveConfig(net.KeepAliveConfig{
+				Enable:   true,
+				Idle:     30 * time.Second,
+				Interval: 15 * time.Second,
+				Count:    4,
+			})
+		}
 		wg.Add(1)
 		go func(c net.Conn) {
 			defer wg.Done()
@@ -286,6 +312,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			frame, err := protocol.Decode(body[2:])
 			if err != nil {
 				return
+			}
+			// body 会在下一帧复用。入队前拷贝载荷，避免后一帧覆盖通道里尚未处理的帧。
+			if n := len(frame.Body); n > 0 {
+				payload := make([]byte, n)
+				copy(payload, frame.Body)
+				frame.Body = payload
 			}
 			if rate > 0 {
 				now := time.Now()
@@ -385,7 +417,7 @@ func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
 func (s *Server) dispatch(ctx context.Context, st *connState, f protocol.Frame) protocol.Frame {
 	switch f.Cmd {
 	case protocol.CmdPing:
-		if st.authed && st.roleID > 0 {
+		if st.authed && st.roleID > 0 && !time.Now().Before(st.nextRenew) {
 			if err := presence.Renew(ctx, s.redis, st.roleID, st.sessionID, 24*time.Hour); err != nil {
 				redisx.RecordError("gate", "presence_renew")
 				s.log.Debug("presence renew failed", zap.Int64("role", st.roleID), zap.Error(err))
@@ -393,9 +425,11 @@ func (s *Server) dispatch(ctx context.Context, st *connState, f protocol.Frame) 
 					st.authed = false
 					return errFrame(f, errors.CodeUnauthorized, "session replaced")
 				}
+			} else {
+				st.nextRenew = time.Now().Add(presenceRenewInterval)
 			}
 		}
-		return protocol.Frame{Cmd: f.Cmd, Act: f.Act, Body: []byte(`{"pong":true}`)}
+		return protocol.Frame{Cmd: f.Cmd, Act: f.Act, Body: pongBody}
 	case protocol.CmdLogin:
 		return s.handleLogin(ctx, st, f)
 	case protocol.CmdGame:
@@ -458,6 +492,7 @@ func (s *Server) handleLogin(ctx context.Context, st *connState, f protocol.Fram
 	st.roleID = info.RoleID
 	st.zoneID = zoneID
 	st.sessionID = sessionID
+	st.nextRenew = time.Now().Add(presenceRenewInterval)
 	if previous.SessionID != "" && previous.SessionID != sessionID && previous.GateHTTP != "" && previous.GateID != s.gateInst {
 		go s.kickPrevious(previous)
 	}
