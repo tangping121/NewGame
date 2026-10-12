@@ -116,11 +116,11 @@ go run ./tools/robot
 | Login | `POST /api/login` | 账号登录，返回 token 与 gate 地址 |
 | Login | `POST /api/enter` | 选区进入 |
 | Gate | TCP `:9000` | Cmd/Act 帧协议，转发至 Game |
-| Game | `POST /internal/player/msg` | 玩家消息处理（Actor） |
+| Game | `POST /internal/player/msg` | 玩家消息处理（Actor；头 `X-NG-Role/Cmd/Act` + body） |
 | Game | `POST /internal/player/dungeon/pass` | 关卡通关 |
 | Match | `POST /api/match/join` | 加入匹配池 |
 | Battle | `POST /api/battle/room/create` | 创建战斗房间 |
-| Mail | `POST /api/mail/send` | 发送邮件 |
+| Mail | `POST /api/mail/send` | 发送邮件（`items` 为字符串如 `gold:10`） |
 | Rank | `GET /api/rank/top?board=dungeon` | 排行榜 |
 | GM | `POST /api/gm/dungeon/pass` | GM 通关（转发 Game） |
 

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"bastion/api/pb"
+	"bastion/pkg/internalauth"
 	"bastion/pkg/protocol"
+	"bastion/pkg/session"
 )
 
 func main() {
@@ -38,9 +40,9 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 	mustRank(rankURL, loginA.RoleId)
 
-	roomID := mustMatch(matchURL, loginA.RoleId, 1)
+	roomID := mustMatch(matchURL, loginA.Token, 1)
 	if roomID == "" {
-		roomID = mustMatch(matchURL, loginB.RoleId, 1)
+		roomID = mustMatch(matchURL, loginB.Token, 1)
 	}
 	if roomID == "" {
 		fail("match", fmt.Errorf("no room_id after two joins"))
@@ -120,7 +122,13 @@ func writeRead(conn net.Conn, frame protocol.Frame) []byte {
 
 func mustDungeonPass(gameURL string, roleID int64) {
 	body, _ := json.Marshal(map[string]any{"role_id": roleID, "dungeon_id": 1})
-	resp, err := http.Post(gameURL+"/internal/player/dungeon/pass", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, gameURL+"/internal/player/dungeon/pass", bytes.NewReader(body))
+	if err != nil {
+		fail("dungeon pass", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	internalauth.SetHTTP(req, env("NG_INTERNAL_SECRET", ""))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fail("dungeon pass", err)
 	}
@@ -150,9 +158,16 @@ func mustRank(url string, roleID int64) {
 	fmt.Printf("rank ok entries=%d (role %d)\n", len(out.List), roleID)
 }
 
-func mustMatch(url string, roleID int64, mode int32) string {
-	body, _ := json.Marshal(pb.MatchRequest{RoleId: roleID, Mode: mode, ZoneId: 1})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+func mustMatch(url, token string, mode int32) string {
+	body, _ := json.Marshal(pb.MatchRequest{Mode: mode, ZoneId: 1})
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		fail("match join", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(session.Header, token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fail("match join", err)
 	}
@@ -167,15 +182,25 @@ func mustMatch(url string, roleID int64, mode int32) string {
 
 func mustBattleSettle(url, roomID string, roleID int64, win bool, score int32) {
 	body, _ := json.Marshal(pb.BattleResultRequest{RoomId: roomID, RoleId: roleID, Win: win, Score: score})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		fail("battle settle", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	internalauth.SetHTTP(req, env("NG_INTERNAL_SECRET", ""))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fail("battle settle", err)
 	}
 	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fail("battle settle", fmt.Errorf("http=%d body=%s", resp.StatusCode, string(raw)))
+	}
 	var out pb.BattleResultResponse
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	_ = json.Unmarshal(raw, &out)
 	if out.Code != 0 {
-		fail("battle settle", fmt.Errorf("code=%d", out.Code))
+		fail("battle settle", fmt.Errorf("code=%d body=%s", out.Code, string(raw)))
 	}
 }
 

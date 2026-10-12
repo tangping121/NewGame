@@ -14,7 +14,7 @@ package protocol
 // 默认端口（区服 1）：
 //   Login :8080  Gate :9000/:8080(health)  Game :9100  Match :9200
 //   Battle :9300  Social :9400  Mail :9500  Rank :9600
-//   Activity :9800  Pay :9700  GM :9900
+//   Activity :9700  Pay :9800  GM :9900
 //
 // 区服 2 Game :9110，Gate TCP :9010
 // ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ const RouteRankGlobalTop = "/api/rank/global/top"
 // ===================== Mail (:9500) =====================
 
 // RouteMailSend POST /api/mail/send
-// 请求: pb.MailSendRequest { role_id, title, content, items }
+// 请求: pb.MailSendRequest { role_id, title, content, items }；items 为 string（如 "gold:10"），非数组
 // 响应: { code: 0 }
 const RouteMailSend = "/api/mail/send"
 
@@ -175,7 +175,7 @@ const RouteActivityClaim = "/api/activity/claim"
 // ===================== Game 内部 (:9100 / :9110) =====================
 
 // RouteGamePlayerMsg POST /internal/player/msg — Gate 转发 CmdGame
-// 请求: { cmd, act, body, role_id }
+// 约定: 请求头 X-NG-Role / X-NG-Cmd / X-NG-Act，HTTP body 为原始 payload（JSON 字节）
 // 响应: 与 TCP CmdGame 各 Act 响应相同（JSON 字节）
 const RouteGamePlayerMsg = "/internal/player/msg"
 
