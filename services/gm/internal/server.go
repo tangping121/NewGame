@@ -95,9 +95,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, method, service, 
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if service == "game" {
-		internalauth.SetHTTP(req, s.cfg.InternalSecret)
-	}
+	// Mail/Pay/Game 等下游均校验 X-Internal-Token；统一附带，避免仅 game 能通。
+	internalauth.SetHTTP(req, s.cfg.InternalSecret)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -204,10 +203,11 @@ func (s *Server) serviceURL(ctx context.Context, name string, zoneID int32) stri
 
 func fallbackURL(name string, zoneID int32) string {
 	ports := map[string]map[int32]string{
-		"game":  {1: "http://127.0.0.1:9100", 2: "http://127.0.0.1:9110"},
-		"mail":  {1: "http://127.0.0.1:9500"},
-		"pay":   {1: "http://127.0.0.1:9700"},
-		"login": {1: "http://127.0.0.1:8080"},
+		"game":     {1: "http://127.0.0.1:9100", 2: "http://127.0.0.1:9110"},
+		"mail":     {1: "http://127.0.0.1:9500"},
+		"pay":      {1: "http://127.0.0.1:9800"},
+		"activity": {1: "http://127.0.0.1:9700"},
+		"login":    {1: "http://127.0.0.1:8080"},
 	}
 	if m, ok := ports[name]; ok {
 		if u, ok := m[zoneID]; ok {
